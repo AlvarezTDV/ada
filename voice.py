@@ -1,44 +1,34 @@
-import pyttsx3
 import speech_recognition as sr
 import os
 import asyncio
 import edge_tts
 import tempfile
+import pyttsx3
 from rich.console import Console
 
 console = Console()
 
 class VoiceEngine:
-    def __init__(self, mode="local"):
+    def __init__(self, mode="edge"):
+        """
+        Inicializa el motor de Voz de A.D.A.
+        mode: 'edge' (Voz Neuronal HD ultra-realista) o 'local' (pyttsx3 nativo).
+        """
         self.mode = mode
         self.recognizer = sr.Recognizer()
         
-        # AJUSTES DE ALTA SENSIBILIDAD PARA DISTANCIA NORMAL:
-        self.recognizer.energy_threshold = 100  # Captura sonidos suaves sin tener que pegarse al micrófono
-        self.recognizer.dynamic_energy_threshold = False  # Mantiene la sensibilidad fija para no atenuar
-        self.recognizer.pause_threshold = 1.3
+        # 1. TIEMPO DE RESPUESTA RÁPIDO:
+        # Reducimos la espera tras silencio a 0.7 segundos para corte inmediato al terminar de hablar.
+        self.recognizer.pause_threshold = 0.7
+        self.recognizer.energy_threshold = 100
+        self.recognizer.dynamic_energy_threshold = False
         
-        self._init_tts()
-
-    def _init_tts(self):
-        """Inicializa el motor de voz TTS de Windows."""
-        try:
-            self.tts_engine = pyttsx3.init()
-            voices = self.tts_engine.getProperty('voices')
-            female_voice = None
-            for voice in voices:
-                if "female" in voice.name.lower() or "helena" in voice.name.lower() or "sabina" in voice.name.lower() or "zira" in voice.name.lower():
-                    female_voice = voice.id
-                    break
-            if female_voice:
-                self.tts_engine.setProperty('voice', female_voice)
-            self.tts_engine.setProperty('rate', 165)
-        except Exception as e:
-            console.print(f"[yellow]⚠️  No se pudo inicializar pyttsx3: {e}[/yellow]")
-            self.tts_engine = None
+        # Voz por defecto en Edge-TTS (Dalia: Femenina, mexicana, muy natural y expresiva)
+        # Opciones disponibles: 'es-MX-DaliaNeural', 'es-ES-ElviraNeural', 'es-CL-CatalinaNeural'
+        self.edge_voice = "es-MX-DaliaNeural"
 
     def speak(self, text: str):
-        """Convierte texto en habla (TTS)."""
+        """Convierte texto en habla (TTS) de alta definición humana."""
         if not text:
             return
             
@@ -47,56 +37,63 @@ class VoiceEngine:
                 asyncio.run(self._speak_edge(text))
                 return
             except Exception as e:
-                console.print(f"[dim red]Error en Edge-TTS, usando fallback local: {e}[/dim red]")
+                console.print(f"[dim red]Fallback a motor local por error en Edge-TTS: {e}[/dim red]")
 
-        # Garantiza que pyttsx3 reinicie el motor si se congela en Windows
-        try:
-            if not hasattr(self, 'tts_engine') or self.tts_engine is None:
-                self._init_tts()
-            self.tts_engine.say(text)
-            self.tts_engine.runAndWait()
-        except Exception as e:
-            console.print(f"[red]Re-inicializando motor de audio TTS por error: {e}[/red]")
-            try:
-                self._init_tts()
-                self.tts_engine.say(text)
-                self.tts_engine.runAndWait()
-            except Exception:
-                pass
+        # Fallback a pyttsx3 nativo de Windows si falla la red
+        self._speak_local(text)
 
     async def _speak_edge(self, text: str):
-        voice = "es-MX-DaliaNeural"
-        communicate = edge_tts.Communicate(text, voice)
+        """Genera y reproduce la voz neuronal humana usando Edge-TTS en tiempo real."""
+        communicate = edge_tts.Communicate(text, self.edge_voice)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
             temp_filename = fp.name
             
         await communicate.save(temp_filename)
-        os.system(f'powershell -c "(New-Object Media.SoundPlayer \'{temp_filename}\').PlaySync()" 2>$null || start /min wmplayer "{temp_filename}"')
+        
+        # Reproducir audio MP3 usando reproductor síncrono ligero en PowerShell
+        cmd = f'powershell -c "(New-Object Media.SoundPlayer \'{temp_filename}\').PlaySync()" 2>$null || powershell -c "(New-Object -com WMPlayer.OCX.7).openPlayer(\'{temp_filename}\')"'
+        os.system(cmd)
         
         try:
             os.remove(temp_filename)
         except Exception:
             pass
 
+    def _speak_local(self, text: str):
+        """Fallback local con re-inicialización limpia."""
+        try:
+            engine = pyttsx3.init()
+            voices = engine.getProperty('voices')
+            for voice in voices:
+                if "female" in voice.name.lower() or "helena" in voice.name.lower() or "sabina" in voice.name.lower():
+                    engine.setProperty('voice', voice.id)
+                    break
+            engine.setProperty('rate', 165)
+            engine.say(text)
+            engine.runAndWait()
+            engine.stop()
+        except Exception:
+            pass
+
     def listen(self) -> str:
-        """Escucha el micrófono con ultra-sensibilidad fija."""
+        """Escucha el micrófono y corta rápido al hacer pausa (0.7s)."""
         with sr.Microphone() as source:
-            console.print("[dim cyan]🎤 Escuchando a Dante... (Habla a distancia normal)[/dim cyan]")
+            console.print("[dim cyan]🎤 Escuchando a Dante...[/dim cyan]")
             try:
-                audio = self.recognizer.listen(source, timeout=10, phrase_time_limit=15)
+                audio = self.recognizer.listen(source, timeout=8, phrase_time_limit=15)
                 console.print("[dim magenta]Procesando voz...[/dim magenta]")
                 text = self.recognizer.recognize_google(audio, language="es-ES")
                 return text
             except sr.WaitTimeoutError:
-                console.print("[dim yellow]No se detectó sonido suficiente.[/dim yellow]")
+                console.print("[dim yellow]No se detectó habla.[/dim yellow]")
                 return ""
             except sr.UnknownValueError:
-                console.print("[dim red]No logré entender el audio.[/dim red]")
+                console.print("[dim red]No entendí el audio.[/dim red]")
                 return ""
             except Exception as e:
-                console.print(f"[red]Error al escuchar micrófono: {e}[/red]")
+                console.print(f"[red]Error micrófono: {e}[/red]")
                 return ""
 
 if __name__ == "__main__":
-    v = VoiceEngine(mode="local")
-    v.speak("Prueba de alta sensibilidad completada.")
+    v = VoiceEngine(mode="edge")
+    v.speak("Hola joven Dante. Esta es mi voz neuronal realista.")

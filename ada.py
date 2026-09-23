@@ -86,7 +86,7 @@ def chat_loop():
     voice_choice = Prompt.ask("¿Activar interacción por Voz (Micrófono y Altavoz)? (s/n)", choices=["s", "n"], default="n")
     voice_active = (voice_choice == "s")
     
-    voice_engine = VoiceEngine(mode="local") if voice_active else None
+    voice_engine = VoiceEngine(mode="edge") if voice_active else None
     
     console.print(f"[green]✔ ADA lista en local: [bold]{model}[/bold][/green]")
     if voice_active:

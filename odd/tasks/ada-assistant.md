@@ -22,6 +22,8 @@ The user wants a personalized assistant that sounds human, responds concisely, a
 - [x] TSK-02: Design the System Prompt for ADA's personality and voice <!-- id: 1 -->
 - [x] TSK-03: Implement `ada.py` conversational core and CLI loop <!-- id: 2 -->
 - [x] TSK-04: Test conversational behavior and response conciseness <!-- id: 3 -->
+- [x] TSK-05: Implement `voice.py` (TTS Text-to-Speech and STT Speech-to-Text) <!-- id: 4 -->
+- [x] TSK-06: Integrate voice pipeline into `ada.py` CLI interface <!-- id: 5 -->
 
 ## Progress and Verification
-- Current state: ADA core built successfully (`ada.py` + `system_prompt.txt` + `requirements.txt`). Dependencies are verified. Ready to run interactively.
+- Current state: Text interaction, SQLite memory, and Voice I/O (STT/TTS) fully implemented and integrated.

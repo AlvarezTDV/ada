@@ -1,2 +1,6 @@
 openai
 rich
+pyttsx3
+SpeechRecognition
+PyAudio
+edge-tts

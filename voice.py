@@ -15,15 +15,14 @@ class VoiceEngine:
         self.mode = mode
         self.recognizer = sr.Recognizer()
         
-        # PARAMETROS DE TIEMPO EXACTOS Y VÁLIDOS (Sin fallos de aserción):
-        # 1. pause_threshold: Tiempo de silencio tras hablar (0.6s para respuesta rápida)
-        self.recognizer.pause_threshold = 0.6
-        # 2. non_speaking_duration: Debe ser menor o igual a pause_threshold (0.5s)
-        self.recognizer.non_speaking_duration = 0.5
+        # PARAMETROS EQUILIBRADOS PARA DESCRITORIO:
+        # 1. pause_threshold = 1.0s: Permite hablar con pausas naturales sin cortar a la mitad.
+        self.recognizer.pause_threshold = 1.0
+        self.recognizer.non_speaking_duration = 0.8
         self.recognizer.phrase_threshold = 0.3
         
-        # Umbral de energía moderado y estable
-        self.recognizer.energy_threshold = 250
+        # Umbral sensible con auto-calibración por frase
+        self.recognizer.energy_threshold = 200
         self.recognizer.dynamic_energy_threshold = True
         
         self.edge_voice = "es-MX-DaliaNeural"
@@ -83,17 +82,14 @@ class VoiceEngine:
             pass
 
     def listen(self) -> str:
-        # Usa el micrófono por defecto (device_index=1: Micrófono Realtek Audio)
-        try:
-            mic = sr.Microphone(device_index=1)
-        except Exception:
-            mic = sr.Microphone()
-            
-        with mic as source:
-            console.print("[dim cyan]🎤 Escuchando a Dante... (Habla ahora)[/dim cyan]")
+        # Usa el micrófono predeterminado activo de Windows
+        with sr.Microphone() as source:
+            console.print("[dim cyan]🎤 Escuchando a Dante... (Habla a ritmo normal)[/dim cyan]")
             try:
+                # Calibración ultra-rápida de 0.2s para ajustar sensibilidad en cada intento
+                self.recognizer.adjust_for_ambient_noise(source, duration=0.2)
                 t0 = time.time()
-                audio = self.recognizer.listen(source, timeout=7, phrase_time_limit=12)
+                audio = self.recognizer.listen(source, timeout=8, phrase_time_limit=15)
                 t1 = time.time()
                 console.print(f"[dim magenta]Procesando voz... (Capturado en {t1-t0:.1f}s)[/dim magenta]")
                 text = self.recognizer.recognize_google(audio, language="es-ES")
@@ -110,4 +106,4 @@ class VoiceEngine:
 
 if __name__ == "__main__":
     v = VoiceEngine(mode="edge")
-    v.speak("Prueba de audio corregida.")
+    v.speak("Prueba de sensibilidad equilibrada.")

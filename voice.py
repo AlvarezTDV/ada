@@ -1,3 +1,4 @@
+import time
 import speech_recognition as sr
 import os
 import asyncio
@@ -11,20 +12,17 @@ console = Console()
 
 class VoiceEngine:
     def __init__(self, mode="edge"):
-        """
-        Inicializa el motor de Voz de A.D.A.
-        mode: 'edge' (Voz Neuronal HD ultra-realista) o 'local' (pyttsx3 nativo).
-        """
         self.mode = mode
         self.recognizer = sr.Recognizer()
         
-        # ULTRA-LATENCIA BAJA (Corte Inmediato al Pausar):
-        # 1. pause_threshold = 0.4s: Corta la captura a los 400ms de silencio (respuesta instantánea).
+        # CALIBRACIÓN DINÁMICA ULTRA-RÁPIDA:
+        # Volvemos a activar el detector de energía dinámico pero con piso bajo (150)
+        # Esto hace que en cuanto dejes de hablar (volumen baja del piso), corte en 0.4s exactos.
+        self.recognizer.energy_threshold = 150
+        self.recognizer.dynamic_energy_threshold = True
         self.recognizer.pause_threshold = 0.4
-        # 2. non_speaking_duration = 0.3s: Ajusta la tolerancia de pequeñas pausas.
+        self.recognizer.phrase_threshold = 0.2
         self.recognizer.non_speaking_duration = 0.3
-        self.recognizer.energy_threshold = 100
-        self.recognizer.dynamic_energy_threshold = False
         
         self.edge_voice = "es-MX-DaliaNeural"
         
@@ -34,7 +32,6 @@ class VoiceEngine:
             pass
 
     def speak(self, text: str):
-        """Convierte texto en habla (TTS) de alta definición de forma 100% invisible."""
         if not text:
             return
             
@@ -48,7 +45,6 @@ class VoiceEngine:
         self._speak_local(text)
 
     async def _speak_edge(self, text: str):
-        """Genera y reproduce el audio MP3 en memoria/segundo plano de forma totalmente invisible."""
         communicate = edge_tts.Communicate(text, self.edge_voice)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
             temp_filename = fp.name
@@ -70,7 +66,6 @@ class VoiceEngine:
                 pass
 
     def _speak_local(self, text: str):
-        """Fallback local con re-inicialización limpia."""
         try:
             engine = pyttsx3.init()
             voices = engine.getProperty('voices')
@@ -86,12 +81,15 @@ class VoiceEngine:
             pass
 
     def listen(self) -> str:
-        """Escucha el micrófono y corta inmediatamente al hacer una pequeña pausa (0.4s)."""
         with sr.Microphone() as source:
             console.print("[dim cyan]🎤 Escuchando a Dante...[/dim cyan]")
             try:
-                audio = self.recognizer.listen(source, timeout=8, phrase_time_limit=15)
-                console.print("[dim magenta]Procesando voz...[/dim magenta]")
+                # 0.1s de ajuste ultrarrápido al ruido ambiente para que reconozca tu silencio al instante
+                self.recognizer.adjust_for_ambient_noise(source, duration=0.1)
+                t0 = time.time()
+                audio = self.recognizer.listen(source, timeout=6, phrase_time_limit=10)
+                t1 = time.time()
+                console.print(f"[dim magenta]Procesando voz... (Audio capturado en {t1-t0:.1f}s)[/dim magenta]")
                 text = self.recognizer.recognize_google(audio, language="es-ES")
                 return text
             except sr.WaitTimeoutError:
@@ -106,4 +104,4 @@ class VoiceEngine:
 
 if __name__ == "__main__":
     v = VoiceEngine(mode="edge")
-    v.speak("Hola joven Dante. Sensibilidad y respuesta rápida ajustadas.")
+    v.speak("Prueba de corte rápido.")

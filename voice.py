@@ -18,14 +18,16 @@ class VoiceEngine:
         self.mode = mode
         self.recognizer = sr.Recognizer()
         
-        # TIEMPO DE RESPUESTA RÁPIDO:
-        self.recognizer.pause_threshold = 0.7
+        # ULTRA-LATENCIA BAJA (Corte Inmediato al Pausar):
+        # 1. pause_threshold = 0.4s: Corta la captura a los 400ms de silencio (respuesta instantánea).
+        self.recognizer.pause_threshold = 0.4
+        # 2. non_speaking_duration = 0.3s: Ajusta la tolerancia de pequeñas pausas.
+        self.recognizer.non_speaking_duration = 0.3
         self.recognizer.energy_threshold = 100
         self.recognizer.dynamic_energy_threshold = False
         
         self.edge_voice = "es-MX-DaliaNeural"
         
-        # Inicializar Pygame Mixer de forma silenciosa para audio invisible
         try:
             pygame.mixer.init()
         except Exception:
@@ -53,7 +55,6 @@ class VoiceEngine:
             
         await communicate.save(temp_filename)
         
-        # Reproducir mediante Pygame Mixer en segundo plano (0 ventanas)
         try:
             pygame.mixer.music.load(temp_filename)
             pygame.mixer.music.play()
@@ -85,7 +86,7 @@ class VoiceEngine:
             pass
 
     def listen(self) -> str:
-        """Escucha el micrófono y corta rápido al hacer pausa (0.7s)."""
+        """Escucha el micrófono y corta inmediatamente al hacer una pequeña pausa (0.4s)."""
         with sr.Microphone() as source:
             console.print("[dim cyan]🎤 Escuchando a Dante...[/dim cyan]")
             try:
@@ -105,4 +106,4 @@ class VoiceEngine:
 
 if __name__ == "__main__":
     v = VoiceEngine(mode="edge")
-    v.speak("Hola joven Dante. Esta es mi voz neuronal invisible.")
+    v.speak("Hola joven Dante. Sensibilidad y respuesta rápida ajustadas.")

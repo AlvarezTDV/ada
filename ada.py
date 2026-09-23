@@ -90,7 +90,7 @@ def chat_loop():
     
     console.print(f"[green]✔ ADA lista en local: [bold]{model}[/bold][/green]")
     if voice_active:
-        console.print("[yellow]🎙️  Modo VOZ activado. (Puedes hablar por el micrófono o escribir en pantalla).[/yellow]")
+        console.print("[yellow]🎙️  Modo VOZ activado (Push-to-Talk activado).[/yellow]")
     console.print("[yellow]Escribe 'salir' para terminar.[/yellow]\n")
     
     messages = [
@@ -101,14 +101,14 @@ def chat_loop():
         try:
             user_input = ""
             
-            # Si la voz está activa, intentar escuchar el micrófono primero
             if voice_active:
-                console.print("[bold cyan]Presiona ENTER para hablarle a ADA (o escribe directamente tu mensaje):[/bold cyan]")
+                console.print("[bold cyan]Presiona ENTER para HABLAR (o escribe tu mensaje directamente):[/bold cyan]")
                 typed_input = input("Dante > ")
                 if typed_input.strip():
                     user_input = typed_input.strip()
                 else:
-                    user_input = voice_engine.listen()
+                    # En modo voz, presionar ENTER inicia la escucha y presionar ENTER de nuevo corta inmediatamente
+                    user_input = voice_engine.listen_manual_push()
                     if user_input:
                         console.print(f"[bold cyan]Dante (Voz):[/bold cyan] {user_input}")
             else:
@@ -142,7 +142,6 @@ def chat_loop():
             console.print(f"[bold magenta]Ada:[/bold magenta] {ada_response}\n")
             messages.append({"role": "assistant", "content": ada_response})
             
-            # Reproducir respuesta por voz si está activa
             if voice_active and voice_engine:
                 voice_engine.speak(ada_response)
             

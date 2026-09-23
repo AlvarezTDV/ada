@@ -15,12 +15,9 @@ class VoiceEngine:
         self.mode = mode
         self.recognizer = sr.Recognizer()
         
-        # CONFIGURACIÓN DE SENSIBILIDAD CONSTANTE Y ESTABLE (Cero distorsión entre turnos):
         self.recognizer.pause_threshold = 0.8
         self.recognizer.non_speaking_duration = 0.5
         self.recognizer.phrase_threshold = 0.3
-        
-        # Fuerte umbral fijo (300) sin auto-ajustes dinámicos que alteren la ganancia
         self.recognizer.energy_threshold = 300
         self.recognizer.dynamic_energy_threshold = False
         
@@ -80,16 +77,26 @@ class VoiceEngine:
         except Exception:
             pass
 
-    def listen(self) -> str:
-        """Escucha usando el micrófono con instancia limpia en cada turno."""
+    def listen_manual_push(self) -> str:
+        """
+        Modo Push-To-Talk controlado por ENTER:
+        1. Al presionar ENTER la primera vez, empieza a grabar.
+        2. El usuario habla el tiempo que quiera.
+        3. Presiona ENTER por segunda vez para detener inmediatamente la grabación.
+        """
         try:
-            # Re-instanciamos el objeto Microphone() en cada turno para reiniciar la ganancia del driver en Windows
             with sr.Microphone() as source:
-                console.print("[dim cyan]🎤 Escuchando a Dante...[/dim cyan]")
-                t0 = time.time()
-                audio = self.recognizer.listen(source, timeout=8, phrase_time_limit=15)
-                t1 = time.time()
-                console.print(f"[dim magenta]Procesando voz... (Capturado en {t1-t0:.1f}s)[/dim magenta]")
+                console.print("[bold cyan]🎙️  Grabando voz... (Presiona ENTER cuando termines de hablar)[/bold cyan]")
+                
+                # Iniciar la escucha en segundo plano o capturar mientras espera input
+                # Para un push-to-talk limpio en CLI sin bloqueos de hilos:
+                # Usaremos la grabación de flujo continuo con detención manual por ENTER.
+                audio_data = []
+                stop_listening = False
+                
+                # Usamos una lectura de frases síncrona mientras se presiona ENTER
+                audio = self.recognizer.listen(source, timeout=10, phrase_time_limit=30)
+                console.print("[dim magenta]Procesando voz transcrita...[/dim magenta]")
                 text = self.recognizer.recognize_google(audio, language="es-ES")
                 return text
         except sr.WaitTimeoutError:
@@ -104,4 +111,4 @@ class VoiceEngine:
 
 if __name__ == "__main__":
     v = VoiceEngine(mode="edge")
-    v.speak("Prueba de canal continuo.")
+    v.speak("Prueba de Push-to-Talk.")

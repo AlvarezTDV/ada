@@ -4,6 +4,7 @@ import asyncio
 import edge_tts
 import tempfile
 import pyttsx3
+import pygame
 from rich.console import Console
 
 console = Console()
@@ -17,18 +18,21 @@ class VoiceEngine:
         self.mode = mode
         self.recognizer = sr.Recognizer()
         
-        # 1. TIEMPO DE RESPUESTA RÁPIDO:
-        # Reducimos la espera tras silencio a 0.7 segundos para corte inmediato al terminar de hablar.
+        # TIEMPO DE RESPUESTA RÁPIDO:
         self.recognizer.pause_threshold = 0.7
         self.recognizer.energy_threshold = 100
         self.recognizer.dynamic_energy_threshold = False
         
-        # Voz por defecto en Edge-TTS (Dalia: Femenina, mexicana, muy natural y expresiva)
-        # Opciones disponibles: 'es-MX-DaliaNeural', 'es-ES-ElviraNeural', 'es-CL-CatalinaNeural'
         self.edge_voice = "es-MX-DaliaNeural"
+        
+        # Inicializar Pygame Mixer de forma silenciosa para audio invisible
+        try:
+            pygame.mixer.init()
+        except Exception:
+            pass
 
     def speak(self, text: str):
-        """Convierte texto en habla (TTS) de alta definición humana."""
+        """Convierte texto en habla (TTS) de alta definición de forma 100% invisible."""
         if not text:
             return
             
@@ -39,25 +43,30 @@ class VoiceEngine:
             except Exception as e:
                 console.print(f"[dim red]Fallback a motor local por error en Edge-TTS: {e}[/dim red]")
 
-        # Fallback a pyttsx3 nativo de Windows si falla la red
         self._speak_local(text)
 
     async def _speak_edge(self, text: str):
-        """Genera y reproduce la voz neuronal humana usando Edge-TTS en tiempo real."""
+        """Genera y reproduce el audio MP3 en memoria/segundo plano de forma totalmente invisible."""
         communicate = edge_tts.Communicate(text, self.edge_voice)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
             temp_filename = fp.name
             
         await communicate.save(temp_filename)
         
-        # Reproducir audio MP3 usando reproductor síncrono ligero en PowerShell
-        cmd = f'powershell -c "(New-Object Media.SoundPlayer \'{temp_filename}\').PlaySync()" 2>$null || powershell -c "(New-Object -com WMPlayer.OCX.7).openPlayer(\'{temp_filename}\')"'
-        os.system(cmd)
-        
+        # Reproducir mediante Pygame Mixer en segundo plano (0 ventanas)
         try:
-            os.remove(temp_filename)
-        except Exception:
-            pass
+            pygame.mixer.music.load(temp_filename)
+            pygame.mixer.music.play()
+            while pygame.mixer.music.get_busy():
+                pygame.time.Clock().tick(10)
+            pygame.mixer.music.unload()
+        except Exception as e:
+            console.print(f"[dim red]Error reproduciendo con Pygame: {e}[/dim red]")
+        finally:
+            try:
+                os.remove(temp_filename)
+            except Exception:
+                pass
 
     def _speak_local(self, text: str):
         """Fallback local con re-inicialización limpia."""
@@ -96,4 +105,4 @@ class VoiceEngine:
 
 if __name__ == "__main__":
     v = VoiceEngine(mode="edge")
-    v.speak("Hola joven Dante. Esta es mi voz neuronal realista.")
+    v.speak("Hola joven Dante. Esta es mi voz neuronal invisible.")

@@ -1,14 +1,14 @@
 import time
 import io
 import wave
-import pyaudio
-import speech_recognition as sr
 import os
+import sys
 import asyncio
 import edge_tts
 import tempfile
 import pyttsx3
 import pygame
+import speech_recognition as sr
 from rich.console import Console
 
 console = Console()
@@ -38,13 +38,16 @@ class VoiceEngine:
         self._speak_local(text)
 
     async def _speak_edge(self, text: str):
+        """Genera y reproduce el audio MP3 sin dejar archivos temporales ni bloqueos de disco."""
         communicate = edge_tts.Communicate(text, self.edge_voice)
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
-            temp_filename = fp.name
-            
-        await communicate.save(temp_filename)
+        
+        # Creación segura del archivo temporal asegurando el cierre del handle antes de la reproducción
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+        temp_filename = temp_file.name
+        temp_file.close() # Se cierra el archivo para evitar bloqueos de permisos en Windows
         
         try:
+            await communicate.save(temp_filename)
             pygame.mixer.music.load(temp_filename)
             pygame.mixer.music.play()
             while pygame.mixer.music.get_busy():
@@ -53,10 +56,11 @@ class VoiceEngine:
         except Exception as e:
             console.print(f"[dim red]Error reproduciendo con Pygame: {e}[/dim red]")
         finally:
-            try:
-                os.remove(temp_filename)
-            except Exception:
-                pass
+            if os.path.exists(temp_filename):
+                try:
+                    os.remove(temp_filename)
+                except Exception:
+                    pass
 
     def _speak_local(self, text: str):
         try:
@@ -73,48 +77,63 @@ class VoiceEngine:
         except Exception:
             pass
 
+    def _get_key_hit(self):
+        """Abstracción multiplataforma para detectar si se presionó la tecla ENTER."""
+        if sys.platform == "win32":
+            import msvcrt
+            if msvcrt.kbhit():
+                key = msvcrt.getch()
+                return key in [b'\r', b'\n']
+            return False
+        else:
+            # En Linux/macOS usar la entrada estándar sin bloqueo (select)
+            import select
+            dr, _, _ = select.select([sys.stdin], [], [], 0)
+            if dr:
+                sys.stdin.readline()
+                return True
+            return False
+
     def listen_manual_push(self) -> str:
         """
-        Push-To-Talk REAL por teclado:
-        - Abre el stream del micrófono al instante en cuanto le das ENTER.
-        - En cuanto presionas ENTER por segunda vez, CORTA EL AUDIO DE INMEDIATO (0.01 segundos).
+        Push-To-Talk multiplataforma con gestión garantizada de recursos de audio (`try...finally`).
         """
+        import pyaudio
+        
         CHUNK = 1024
         FORMAT = pyaudio.paInt16
         CHANNELS = 1
         RATE = 16000
         
         p = pyaudio.PyAudio()
+        stream = None
+        frames = []
+        
+        console.print("[bold cyan]🔴 GRABANDO VOZ... Presiona ENTER para DETENER Y ENVIAR AL INSTANTE.[/bold cyan]")
+        
         try:
             stream = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, frames_per_buffer=CHUNK)
-        except Exception as e:
-            console.print(f"[red]Error abriendo micrófono: {e}[/red]")
-            return ""
-
-        console.print("[bold cyan]🔴 GRABANDO VOZ... Presiona ENTER en cualquier momento para DETENER Y ENVIAR AL INSTANTE.[/bold cyan]")
-        
-        frames = []
-        import sys
-        import msvcrt
-
-        # Grabación manual continua en búfer de memoria hasta presionar ENTER
-        while True:
-            data = stream.read(CHUNK, exception_on_overflow=False)
-            frames.append(data)
-            
-            # Detectar si el usuario presionó la tecla ENTER en la consola Windows
-            if msvcrt.kbhit():
-                key = msvcrt.getch()
-                if key in [b'\r', b'\n']: # ENTER detectado
+            while True:
+                data = stream.read(CHUNK, exception_on_overflow=False)
+                frames.append(data)
+                
+                if self._get_key_hit():
                     break
+        except Exception as e:
+            console.print(f"[red]Error abriendo/leyendo micrófono: {e}[/red]")
+            return ""
+        finally:
+            # Garantizamos la liberación segura del hardware de audio sin importar excepciones
+            if stream is not None:
+                try:
+                    stream.stop_stream()
+                    stream.close()
+                except Exception:
+                    pass
+            p.terminate()
 
         console.print("[dim magenta]🛑 Grabación detenida al instante. Transcribiendo...[/dim magenta]")
-        
-        stream.stop_stream()
-        stream.close()
-        p.terminate()
 
-        # Convertir búfer de audio en objeto AudioData de SpeechRecognition
         wav_buffer = io.BytesIO()
         wf = wave.open(wav_buffer, 'wb')
         wf.setnchannels(CHANNELS)
@@ -139,4 +158,4 @@ class VoiceEngine:
 
 if __name__ == "__main__":
     v = VoiceEngine(mode="edge")
-    v.speak("Prueba de Push-to-talk real instantáneo.")
+    v.speak("Prueba de refactorización de voz segura.")

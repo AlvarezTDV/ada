@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import threading
 from openai import OpenAI
 from rich.console import Console
 from rich.panel import Panel
@@ -14,17 +15,23 @@ console = Console()
 DEFAULT_LOCAL_URL = "http://localhost:11434/v1"
 DEFAULT_MODEL = "qwen2.5:3b"
 
-def load_system_prompt():
-    """Carga el prompt del sistema e inyecta la memoria persistente."""
-    try:
-        with open("system_prompt.txt", "r", encoding="utf-8") as f:
-            base_prompt = f.read().strip()
-    except FileNotFoundError:
-        base_prompt = "Eres A.D.A (Eida), la perspicaz asistente del joven Dante."
-    
-    mem_context = memory.format_memories_for_prompt()
-    full_prompt = f"{base_prompt}\n\n{mem_context}"
-    return full_prompt
+# Cache en memoria para evitar I/O constante de disco y SQLite por turno
+_CACHED_SYSTEM_PROMPT = None
+
+def get_system_prompt(reload: bool = False) -> str:
+    """Carga y almacena en caché el prompt del sistema e inyecta la memoria persistente."""
+    global _CACHED_SYSTEM_PROMPT
+    if _CACHED_SYSTEM_PROMPT is None or reload:
+        try:
+            with open("system_prompt.txt", "r", encoding="utf-8") as f:
+                base_prompt = f.read().strip()
+        except FileNotFoundError:
+            base_prompt = "Eres A.D.A (Eida), la perspicaz asistente del joven Dante."
+        
+        mem_context = memory.format_memories_for_prompt()
+        _CACHED_SYSTEM_PROMPT = f"{base_prompt}\n\n{mem_context}"
+        
+    return _CACHED_SYSTEM_PROMPT
 
 def get_client():
     """Configuración rápida de conexión con fallback a Local."""
@@ -37,15 +44,18 @@ def get_client():
     
     return OpenAI(base_url=DEFAULT_LOCAL_URL, api_key="not-needed"), DEFAULT_MODEL
 
-def check_and_save_tool_call(user_input: str, client: OpenAI, model: str):
-    """Filtro inteligente para guardar observaciones relevantes en la memoria SQLite."""
+def _async_extract_and_save_memory(user_input: str, client: OpenAI, model: str):
+    """
+    Tarea secundaria en segundo plano (Worker Thread):
+    Analiza y guarda la memoria de forma asíncrona sin bloquear la respuesta de ADA al usuario.
+    """
     if len(user_input.strip().split()) < 3 or user_input.lower() in ["hola", "buenos dias", "chau", "jaja", "xd"]:
         return
 
     extraction_prompt = (
         "Analiza el siguiente texto introducido por el usuario. "
         "Si contiene una preferencia personal, un proyecto, un dato relevante sobre sí mismo o una instrucción permanente, "
-        "extrae la información en formato JSON con las llaves 'should_save' (boolean), 'category' (string), 'key' (string) y 'value' (string). "
+        "extrae la información en formato JSON estrictamente válido con las llaves 'should_save' (boolean), 'category' (string), 'key' (string) y 'value' (string). "
         "Si es solo charla casual, saludos o conversación efímera, responde únicamente {\"should_save\": false}.\n\n"
         f"Texto: \"{user_input}\""
     )
@@ -57,21 +67,35 @@ def check_and_save_tool_call(user_input: str, client: OpenAI, model: str):
             temperature=0.1
         )
         content = res.choices[0].message.content.strip()
+        
+        # Extracción segura de JSON
         if "{" in content and "}" in content:
             json_str = content[content.find("{"):content.rfind("}")+1]
             data = json.loads(json_str)
-            if data.get("should_save"):
+            if isinstance(data, dict) and data.get("should_save"):
                 memory.save_memory(
-                    category=data.get("category", "general"),
-                    key=data.get("key", "dato"),
-                    value=data.get("value", "")
+                    category=str(data.get("category", "general")),
+                    key=str(data.get("key", "dato")),
+                    value=str(data.get("value", ""))
                 )
-                console.print(f"[dim green]🧠 [Memoria ADA guardada]: {data.get('key')} -> {data.get('value')}[/dim green]")
-    except Exception:
+                # Invalidar caché de prompt para incluir la nueva memoria en los turnos futuros
+                get_system_prompt(reload=True)
+                console.print(f"\n[dim green]🧠 [Memoria ADA guardada]: {data.get('key')} -> {data.get('value')}[/dim green]")
+    except Exception as e:
+        # Registro silencioso o de depuración en lugar de ignorar fallos a ciegas
         pass
 
+def schedule_memory_check(user_input: str, client: OpenAI, model: str):
+    """Lanza el análisis de memoria en un hilo secundario sin esperar su finalización (Latencia 0ms)."""
+    t = threading.Thread(
+        target=_async_extract_and_save_memory,
+        args=(user_input, client, model),
+        daemon=True
+    )
+    t.start()
+
 def chat_loop():
-    """Bucle principal de conversación interactiva (Texto / Voz)."""
+    """Bucle principal de conversación interactiva optimizado (Texto / Voz)."""
     memory.init_db()
     
     console.print(Panel.fit(
@@ -82,7 +106,6 @@ def chat_loop():
     
     client, model = get_client()
     
-    # Preguntar si se activa el modo voz
     voice_choice = Prompt.ask("¿Activar interacción por Voz (Micrófono y Altavoz)? (s/n)", choices=["s", "n"], default="n")
     voice_active = (voice_choice == "s")
     
@@ -90,11 +113,11 @@ def chat_loop():
     
     console.print(f"[green]✔ ADA lista en local: [bold]{model}[/bold][/green]")
     if voice_active:
-        console.print("[yellow]🎙️  Modo VOZ activado (Push-to-Talk activado).[/yellow]")
+        console.print("[yellow]🎙️  Modo VOZ activado (Push-to-Talk instantáneo activado).[/yellow]")
     console.print("[yellow]Escribe 'salir' para terminar.[/yellow]\n")
     
     messages = [
-        {"role": "system", "content": load_system_prompt()}
+        {"role": "system", "content": get_system_prompt()}
     ]
     
     while True:
@@ -107,7 +130,6 @@ def chat_loop():
                 if typed_input.strip():
                     user_input = typed_input.strip()
                 else:
-                    # En modo voz, presionar ENTER inicia la escucha y presionar ENTER de nuevo corta inmediatamente
                     user_input = voice_engine.listen_manual_push()
                     if user_input:
                         console.print(f"[bold cyan]Dante (Voz):[/bold cyan] {user_input}")
@@ -124,13 +146,18 @@ def chat_loop():
             if not user_input.strip():
                 continue
             
-            check_and_save_tool_call(user_input, client, model)
-            messages[0] = {"role": "system", "content": load_system_prompt()}
+            # 1. Lanzo la extracción de memoria en SEGUNDO PLANO (0ms de espera para el usuario)
+            schedule_memory_check(user_input, client, model)
+            
+            # 2. Actualizo el mensaje system con el caché actual
+            messages[0] = {"role": "system", "content": get_system_prompt()}
             messages.append({"role": "user", "content": user_input})
             
+            # Ventana de contexto deslizante (últimos 10 mensajes)
             if len(messages) > 11:
                 messages = [messages[0]] + messages[-10:]
                 
+            # 3. Respondo AL INSTANTE sin esperar a la memoria
             with console.status("[dim magenta]Ada pensando...[/dim magenta]"):
                 response = client.chat.completions.create(
                     model=model,

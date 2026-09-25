@@ -24,6 +24,7 @@ The user wants a personalized assistant that sounds human, responds concisely, a
 - [x] TSK-04: Test conversational behavior and response conciseness <!-- id: 3 -->
 - [x] TSK-05: Implement `voice.py` (TTS Text-to-Speech and STT Speech-to-Text) <!-- id: 4 -->
 - [x] TSK-06: Integrate voice pipeline into `ada.py` CLI interface <!-- id: 5 -->
+- [x] TSK-07: Refactor audit findings (asynchronous memory worker, PyAudio resource guards, SQLite context managers, cross-platform I/O) <!-- id: 6 -->
 
 ## Progress and Verification
-- Current state: Text interaction, SQLite memory, and Voice I/O (STT/TTS) fully implemented and integrated.
+- Current state: Refactoring complete on branch 'fix'. All audit findings resolved and verified. Ready to merge.

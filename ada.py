@@ -13,7 +13,7 @@ from voice import VoiceEngine  # Módulo de Voz I/O
 console = Console()
 
 DEFAULT_LOCAL_URL = "http://localhost:11434/v1"
-DEFAULT_MODEL = "qwen2.5:3b"
+DEFAULT_MODEL = "qwen3:8b"
 
 # Cache en memoria para evitar I/O constante de disco y SQLite por turno
 _CACHED_SYSTEM_PROMPT = None

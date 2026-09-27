@@ -141,11 +141,11 @@ def classify_input_mode(text: str) -> dict:
     # Short input that matches a casual signal → always casual, even if a task
     # keyword appears (e.g. "cómo estás" contains "cómo" but is a greeting)
     if word_count <= 5 and any(sig in lowered for sig in CASUAL_SIGNALS):
-        return {"mode": "casual", "max_tokens": 80, "temperature": 0.4}
+        return {"mode": "casual", "max_tokens": 120, "temperature": 0.4}
 
     # Short input with no task keyword → casual
     if word_count <= 5 and not any(kw in lowered for kw in TASK_KEYWORDS):
-        return {"mode": "casual", "max_tokens": 80, "temperature": 0.4}
+        return {"mode": "casual", "max_tokens": 120, "temperature": 0.4}
 
     # Any task keyword present → task
     if any(kw in lowered for kw in TASK_KEYWORDS):
@@ -156,7 +156,7 @@ def classify_input_mode(text: str) -> dict:
         return {"mode": "task", "max_tokens": 500, "temperature": 0.3}
 
     # Default → casual
-    return {"mode": "casual", "max_tokens": 80, "temperature": 0.4}
+    return {"mode": "casual", "max_tokens": 120, "temperature": 0.4}
 
 
 def chat_loop():

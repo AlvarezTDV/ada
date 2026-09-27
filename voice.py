@@ -5,6 +5,8 @@ import os
 import re
 import sys
 import asyncio
+import threading
+import queue
 import edge_tts
 import tempfile
 import pyttsx3
@@ -60,35 +62,71 @@ class VoiceEngine:
         self._speak_local(text)
 
     async def _speak_edge(self, text: str):
-        """Split text into sentences and play each chunk sequentially to reduce perceived latency."""
+        """
+        Chunked TTS with prefetch overlap:
+        - Generates next chunk's audio in a background thread while current chunk plays.
+        - Dramatically reduces the pause between sentences.
+        """
         chunks = re.split(r'(?<=[.!?:])\s+', text)
         chunks = [c.strip() for c in chunks if len(c.strip()) >= 2]
 
         if not chunks:
             return
 
-        for chunk in chunks:
-            communicate = edge_tts.Communicate(chunk, self.edge_voice)
-
+        async def generate_audio(chunk: str) -> str | None:
+            """Generate a temp mp3 for a chunk and return its path, or None on failure."""
             temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
             temp_filename = temp_file.name
             temp_file.close()
-
             try:
+                communicate = edge_tts.Communicate(chunk, self.edge_voice)
                 await communicate.save(temp_filename)
-                pygame.mixer.music.load(temp_filename)
+                return temp_filename
+            except Exception as e:
+                console.print(f"[dim red]Error generando audio: {e}[/dim red]")
+                try:
+                    os.remove(temp_filename)
+                except Exception:
+                    pass
+                return None
+
+        def play_and_cleanup(filename: str):
+            """Load, play, wait, unload, delete a temp mp3 file."""
+            try:
+                pygame.mixer.music.load(filename)
                 pygame.mixer.music.play()
                 while pygame.mixer.music.get_busy():
                     pygame.time.Clock().tick(10)
                 pygame.mixer.music.unload()
             except Exception as e:
-                console.print(f"[dim red]Error reproduciendo chunk con Pygame: {e}[/dim red]")
+                console.print(f"[dim red]Error reproduciendo chunk: {e}[/dim red]")
             finally:
-                if os.path.exists(temp_filename):
-                    try:
-                        os.remove(temp_filename)
-                    except Exception:
-                        pass
+                try:
+                    os.remove(filename)
+                except Exception:
+                    pass
+
+        # Pre-generate the first chunk before entering the loop
+        current_file = await generate_audio(chunks[0])
+
+        for i, chunk in enumerate(chunks):
+            # Kick off generation of the NEXT chunk in a background thread
+            # while we play the current one — overlapping I/O and playback
+            next_file_holder = [None]
+
+            async def prefetch_next():
+                if i + 1 < len(chunks):
+                    next_file_holder[0] = await generate_audio(chunks[i + 1])
+
+            prefetch_task = asyncio.create_task(prefetch_next())
+
+            # Play the current chunk (blocking until done)
+            if current_file:
+                play_and_cleanup(current_file)
+
+            # Wait for the next chunk to finish generating
+            await prefetch_task
+            current_file = next_file_holder[0]
 
     def _speak_local(self, text: str):
         try:

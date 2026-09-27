@@ -2,6 +2,7 @@ import time
 import io
 import wave
 import os
+import re
 import sys
 import asyncio
 import edge_tts
@@ -24,10 +25,31 @@ class VoiceEngine:
         except Exception:
             pass
 
+    @staticmethod
+    def clean_for_tts(text: str) -> str:
+        """Strip markdown symbols so TTS reads clean natural text."""
+        # Remove bold/italic markers while keeping inner text
+        text = re.sub(r'\*\*?(.*?)\*\*?', r'\1', text)
+        # Remove heading markers
+        text = re.sub(r'#{1,6}\s?', '', text)
+        # Remove remaining inline symbols
+        text = re.sub(r'[*_`~|]', '', text)
+        # Remove markdown links [label](url)
+        text = re.sub(r'\[.*?\]\(.*?\)', '', text)
+        # Remove list bullets at the start of lines
+        text = re.sub(r'(?m)^\s*[-•]\s?', '', text)
+        # Replace newlines with spoken pauses
+        text = re.sub(r'\n+', '. ', text)
+        # Collapse extra whitespace
+        text = re.sub(r'\s{2,}', ' ', text)
+        return text.strip()
+
     def speak(self, text: str):
         if not text:
             return
-            
+
+        text = self.clean_for_tts(text)
+
         if self.mode == "edge":
             try:
                 asyncio.run(self._speak_edge(text))
@@ -38,29 +60,35 @@ class VoiceEngine:
         self._speak_local(text)
 
     async def _speak_edge(self, text: str):
-        """Genera y reproduce el audio MP3 sin dejar archivos temporales ni bloqueos de disco."""
-        communicate = edge_tts.Communicate(text, self.edge_voice)
-        
-        # Creación segura del archivo temporal asegurando el cierre del handle antes de la reproducción
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-        temp_filename = temp_file.name
-        temp_file.close() # Se cierra el archivo para evitar bloqueos de permisos en Windows
-        
-        try:
-            await communicate.save(temp_filename)
-            pygame.mixer.music.load(temp_filename)
-            pygame.mixer.music.play()
-            while pygame.mixer.music.get_busy():
-                pygame.time.Clock().tick(10)
-            pygame.mixer.music.unload()
-        except Exception as e:
-            console.print(f"[dim red]Error reproduciendo con Pygame: {e}[/dim red]")
-        finally:
-            if os.path.exists(temp_filename):
-                try:
-                    os.remove(temp_filename)
-                except Exception:
-                    pass
+        """Split text into sentences and play each chunk sequentially to reduce perceived latency."""
+        chunks = re.split(r'(?<=[.!?:])\s+', text)
+        chunks = [c.strip() for c in chunks if len(c.strip()) >= 2]
+
+        if not chunks:
+            return
+
+        for chunk in chunks:
+            communicate = edge_tts.Communicate(chunk, self.edge_voice)
+
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+            temp_filename = temp_file.name
+            temp_file.close()
+
+            try:
+                await communicate.save(temp_filename)
+                pygame.mixer.music.load(temp_filename)
+                pygame.mixer.music.play()
+                while pygame.mixer.music.get_busy():
+                    pygame.time.Clock().tick(10)
+                pygame.mixer.music.unload()
+            except Exception as e:
+                console.print(f"[dim red]Error reproduciendo chunk con Pygame: {e}[/dim red]")
+            finally:
+                if os.path.exists(temp_filename):
+                    try:
+                        os.remove(temp_filename)
+                    except Exception:
+                        pass
 
     def _speak_local(self, text: str):
         try:

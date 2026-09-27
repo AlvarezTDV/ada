@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import json
 import threading
@@ -94,6 +95,70 @@ def schedule_memory_check(user_input: str, client: OpenAI, model: str):
     )
     t.start()
 
+def classify_input_mode(text: str) -> dict:
+    """
+    Classify user input as 'casual' or 'task' using only local heuristics.
+    Returns a dict with mode, max_tokens, and temperature.
+    """
+    TASK_KEYWORDS = {
+        # Action verbs — Spanish
+        "planifica", "planea", "organiza", "crea", "escribe", "redacta", "lista",
+        "enumera", "explícame", "explica", "describe", "genera", "diseña", "resume",
+        "traduce", "analiza", "compara", "calcula", "investiga", "busca", "desarrolla",
+        "implementa", "configura", "ayúdame", "dime", "cuéntame",
+        # Action verbs — English
+        "plan", "create", "write", "list", "explain", "describe", "generate", "design",
+        "summarize", "translate", "analyze", "compare", "calculate",
+        # Time / structure signals — Spanish
+        "semana", "semanas", "día", "días", "mes", "meses", "hoy", "mañana", "pasos",
+        "paso", "agenda", "horario", "rutina", "cronograma", "tareas", "tarea",
+        "proyecto",
+        # Time / structure signals — English
+        "week", "days", "month", "today", "tomorrow", "steps", "schedule", "tasks",
+        "project",
+        # Request markers — Spanish
+        "cómo", "qué necesito", "qué debo", "cuál es", "cuáles son",
+        # Request markers — English
+        "how", "what", "which", "why",
+    }
+
+    CASUAL_SIGNALS = {
+        # Greetings — Spanish
+        "hola", "buenas", "buenos días", "buenas tardes", "buenas noches",
+        "qué tal", "cómo estás", "cómo vas",
+        # Greetings — English
+        "hi", "hey", "good morning", "good night",
+        # Short reactions
+        "jaja", "jeje", "xd", "lol", "ok", "okay", "sí", "no", "dale", "claro",
+        "entendido", "gracias", "thanks", "perfecto", "genial", "bien", "mal",
+        "uff", "wow", "ah", "oh",
+    }
+
+    lowered = text.lower().strip()
+    words = lowered.split()
+    word_count = len(words)
+
+    # Short input that matches a casual signal → always casual, even if a task
+    # keyword appears (e.g. "cómo estás" contains "cómo" but is a greeting)
+    if word_count <= 5 and any(sig in lowered for sig in CASUAL_SIGNALS):
+        return {"mode": "casual", "max_tokens": 80, "temperature": 0.4}
+
+    # Short input with no task keyword → casual
+    if word_count <= 5 and not any(kw in lowered for kw in TASK_KEYWORDS):
+        return {"mode": "casual", "max_tokens": 80, "temperature": 0.4}
+
+    # Any task keyword present → task
+    if any(kw in lowered for kw in TASK_KEYWORDS):
+        return {"mode": "task", "max_tokens": 500, "temperature": 0.3}
+
+    # Long input is always a task
+    if word_count > 15:
+        return {"mode": "task", "max_tokens": 500, "temperature": 0.3}
+
+    # Default → casual
+    return {"mode": "casual", "max_tokens": 80, "temperature": 0.4}
+
+
 def chat_loop():
     """Bucle principal de conversación interactiva optimizado (Texto / Voz)."""
     memory.init_db()
@@ -156,13 +221,21 @@ def chat_loop():
             # Ventana de contexto deslizante (últimos 10 mensajes)
             if len(messages) > 11:
                 messages = [messages[0]] + messages[-10:]
+
+            # Detección de modo: casual vs tarea (lógica local, 0ms)
+            mode_info = classify_input_mode(user_input)
+            mode = mode_info["mode"]
+            temperature = mode_info["temperature"]
+            max_tokens = mode_info["max_tokens"]
+            console.print(f"[dim]🎯 Modo: {mode} | temp={temperature} | max_tokens={max_tokens}[/dim]")
                 
             # 3. Respondo AL INSTANTE sin esperar a la memoria
             with console.status("[dim magenta]Ada pensando...[/dim magenta]"):
                 response = client.chat.completions.create(
                     model=model,
                     messages=messages,
-                    temperature=0.6,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
                 )
                 
             ada_response = response.choices[0].message.content.strip()

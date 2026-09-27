@@ -130,10 +130,14 @@ def classify_input_mode(text: str) -> dict:
         "lista", "enumera", "describe", "genera", "diseña", "resume",
         "traduce", "calcula", "desarrolla", "implementa", "configura",
         "cuéntame", "cuentame", "busca", "muéstrame", "muestrame", "dame", "hazme",
+        "elabora", "elaborar", "prepara", "preparar", "construye", "construir",
+        "sugiere", "sugerir", "propón", "propon", "proponer", "corrige", "corregir",
+        "planificación", "planificacion", "borrador", "ideas", "ejemplo", "ejemplos",
+        "plantilla", "estructura", "esquema", "guía", "guia", "tutorial", "código", "codigo", "script",
         # Structured output — English
         "plan", "create", "write", "list", "describe", "generate", "design",
         "summarize", "translate", "calculate", "implement", "configure",
-        "show me", "give me", "make me", "find",
+        "show me", "give me", "make me", "find", "suggest", "draft", "code", "template",
         # Time / structure signals — Spanish
         "semana", "semanas", "día", "dia", "días", "dias", "mes", "meses", "mañana", "manana",
         "pasos", "paso", "agenda", "horario", "rutina", "cronograma",
@@ -260,7 +264,7 @@ def classify_input_mode(text: str) -> dict:
         return {"mode": "task", "max_tokens": 700, "temperature": 0.3, "think": False}
 
     # Long input with no specific signal → treat as task (needs structured output)
-    if word_count > 15:
+    if word_count > 12:
         return {"mode": "task", "max_tokens": 700, "temperature": 0.3, "think": False}
 
     # ── 4. Default → casual ───────────────────────────────────────────────────

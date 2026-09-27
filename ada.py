@@ -236,7 +236,7 @@ def chat_loop():
                     messages=messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
-                    extra_body={"options": {"think": False}},
+                    extra_body={"options": {"think": False, "num_ctx": 2048}},
                 )
 
             ada_response = response.choices[0].message.content.strip()
@@ -250,7 +250,7 @@ def chat_loop():
                     messages=messages,
                     temperature=temperature,
                     max_tokens=max_tokens * 3,
-                    extra_body={"options": {"think": False}},
+                    extra_body={"options": {"think": False, "num_ctx": 2048}},
                 )
                 ada_response = response.choices[0].message.content.strip()
 

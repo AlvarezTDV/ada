@@ -110,8 +110,9 @@ class VoiceEngine:
         current_file = await generate_audio(chunks[0])
 
         for i, chunk in enumerate(chunks):
-            # Kick off generation of the NEXT chunk in a background thread
-            # while we play the current one — overlapping I/O and playback
+            # Kick off generation of the NEXT chunk concurrently.
+            # run_in_executor offloads pygame playback to a thread so the event
+            # loop stays alive and can actually drive the prefetch coroutine.
             next_file_holder = [None]
 
             async def prefetch_next():
@@ -120,11 +121,12 @@ class VoiceEngine:
 
             prefetch_task = asyncio.create_task(prefetch_next())
 
-            # Play the current chunk (blocking until done)
+            # Play in a thread — event loop stays free for prefetch_task
             if current_file:
-                play_and_cleanup(current_file)
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, play_and_cleanup, current_file)
 
-            # Wait for the next chunk to finish generating
+            # By the time playback ends, prefetch is already done or nearly so
             await prefetch_task
             current_file = next_file_holder[0]
 

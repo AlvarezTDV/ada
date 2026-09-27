@@ -141,22 +141,22 @@ def classify_input_mode(text: str) -> dict:
     # Short input that matches a casual signal → always casual, even if a task
     # keyword appears (e.g. "cómo estás" contains "cómo" but is a greeting)
     if word_count <= 5 and any(sig in lowered for sig in CASUAL_SIGNALS):
-        return {"mode": "casual", "max_tokens": 120, "temperature": 0.4}
+        return {"mode": "casual", "max_tokens": 256, "temperature": 0.4}
 
     # Short input with no task keyword → casual
     if word_count <= 5 and not any(kw in lowered for kw in TASK_KEYWORDS):
-        return {"mode": "casual", "max_tokens": 120, "temperature": 0.4}
+        return {"mode": "casual", "max_tokens": 256, "temperature": 0.4}
 
     # Any task keyword present → task
     if any(kw in lowered for kw in TASK_KEYWORDS):
-        return {"mode": "task", "max_tokens": 500, "temperature": 0.3}
+        return {"mode": "task", "max_tokens": 700, "temperature": 0.3}
 
     # Long input is always a task
     if word_count > 15:
-        return {"mode": "task", "max_tokens": 500, "temperature": 0.3}
+        return {"mode": "task", "max_tokens": 700, "temperature": 0.3}
 
     # Default → casual
-    return {"mode": "casual", "max_tokens": 120, "temperature": 0.4}
+    return {"mode": "casual", "max_tokens": 256, "temperature": 0.4}
 
 
 def chat_loop():
@@ -236,9 +236,26 @@ def chat_loop():
                     messages=messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
+                    extra_body={"options": {"think": False}},
                 )
-                
+
             ada_response = response.choices[0].message.content.strip()
+
+            # Guard: si el modelo devolvió vacío (thinking consumió el budget),
+            # reintentamos una vez con triple presupuesto y thinking forzado a off.
+            if not ada_response:
+                console.print("[dim red]⚠ Respuesta vacía, reintentando...[/dim red]")
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens * 3,
+                    extra_body={"options": {"think": False}},
+                )
+                ada_response = response.choices[0].message.content.strip()
+
+            if not ada_response:
+                ada_response = "..."
             console.print(f"[bold magenta]Ada:[/bold magenta] {ada_response}\n")
             messages.append({"role": "assistant", "content": ada_response})
             

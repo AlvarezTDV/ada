@@ -34,31 +34,69 @@ MODE_EMOJI = {
 
 _CACHED_SYSTEM_PROMPT = None
 
-# ─── Detección de borrado de memoria por orden directa ────────────────────────
-_DELETE_PATTERNS = [
-    r"\b(olvida|olv[ií]date|borra|elimina|quita|remove|forget|delete)\b.{0,40}\b(que|lo de|mi|mis|el dato|la info)?\b",
-]
+# ─── Detección de intención de borrado ────────────────────────────────────────
+
+_DELETE_VERBS = re.compile(
+    r"\b(olvida(?:te|r)?|borra(?:r)?|elimina(?:r)?|quita(?:r)?|remove|forget|delete|suprime|descarta)\b",
+    re.IGNORECASE,
+)
+
+# Mapeo de palabras clave a claves canónicas de la DB
+_DELETE_KEY_MAP = {
+    # Más específicos primero — evitan falsos positivos por substrings
+    "cumpleaños": "fecha_cumpleaños",
+    "cumpleanos": "fecha_cumpleaños",
+    "cumpleano": "fecha_cumpleaños",
+    "birthday": "fecha_cumpleaños",
+    "enamorada": "cumpleaños_enamorada",
+    "novia": "cumpleaños_enamorada",
+    "novio": "cumpleaños_novio",
+    "recordatorio": "recordatorio",
+    "reminder": "recordatorio",
+    "evento": "evento",
+    "ubicacion": "ubicacion",
+    "ciudad": "ubicacion",
+    "pais": "ubicacion",
+    "location": "ubicacion",
+    "ocupacion": "ocupacion",
+    "trabajo": "ocupacion",
+    "carrera": "ocupacion",
+    "estudio": "ocupacion",
+    "nombre": "nombre",
+    "name": "nombre",
+    # Edad al final para no matchear "años" dentro de "cumpleanos"
+    "edad": "edad",
+    "anios": "edad",
+    "anos": "edad",
+    "años": "edad",
+    "age": "edad",
+}
 
 def _detect_delete_intent(text: str) -> str | None:
     """
-    Retorna el keyword objetivo del borrado si el input parece una orden de olvidar.
-    Ej: 'olvida que tengo 20 años' → '20 años' / 'edad'
+    Retorna la clave/keyword objetivo si el input es una orden de olvidar/borrar.
+    Ej: 'olvida que tengo 20 años' → 'edad'
     Retorna None si no es una orden de borrado.
     """
     lowered = text.lower().strip()
-    for pat in _DELETE_PATTERNS:
-        if re.search(pat, lowered):
-            # Extraer lo que viene después del verbo de borrado
-            # Quitar el verbo y palabras puente para aislar el sujeto
-            cleaned = re.sub(
-                r"^.{0,60}?(olvida(te)?|borra|elimina|quita|remove|forget|delete)\s*(que\s*)?",
-                "", lowered, flags=re.IGNORECASE
-            ).strip()
-            # Quitar frases comunes que no son el dato
-            cleaned = re.sub(r"^(tengo|soy|mi|mis|el|la|lo de)\s*", "", cleaned).strip()
-            if len(cleaned) >= 2:
-                return cleaned
-    return None
+    if not _DELETE_VERBS.search(lowered):
+        return None
+
+    # Aislar el sujeto: quitar verbo y palabras puente
+    subject = _DELETE_VERBS.sub("", lowered)
+    subject = re.sub(
+        r"\b(que|lo de|mi|mis|el dato de|la info de|de que|puedes|por favor|tengo|soy|es|el|la|un|una|\d+)\b",
+        " ", subject
+    )
+    subject = re.sub(r"\s{2,}", " ", subject).strip(" .,")
+
+    # Intentar mapear a clave canónica
+    for palabra, clave in _DELETE_KEY_MAP.items():
+        if palabra in subject:
+            return clave
+
+    # Fallback: devolver el sujeto limpio como keyword fuzzy
+    return subject if len(subject) >= 2 else None
 
 # ─── System Prompt ─────────────────────────────────────────────────────────────
 
@@ -97,31 +135,44 @@ def get_client():
 
 # Patrones directos para datos personales comunes — no dependen del modelo
 _MEMORY_PATTERNS = [
-    # Edad: "tengo 20 años", "tengo 20", "mi edad es 20", "cumplo 21"
+    # Edad: "tengo 20 años", "mi edad es 20", "cumplo 21"
     (r"(?:tengo|mi edad es|tiene|cumplo)\s+(\d{1,3})\s*a[ñn]os?", "personal", "edad", r"\1 años"),
     # Nombre propio: "me llamo X", "mi nombre es X"
     (r"(?:me llamo|mi nombre es|soy)\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)?)", "personal", "nombre", r"\1"),
-    # Cumpleaños: "mi cumpleaños es el 5 de abril", "nací el ..."
+    # Mi cumpleaños: "mi cumpleaños es el 5 de abril", "nací el ..."
     (r"(?:mi cumplea[ñn]os es(?: el)?|nac[ií](?: el)?)\s+(.{4,30}?)(?:\.|,|$)", "personal", "fecha_cumpleaños", r"\1"),
+    # Cumpleaños de tercero: "el cumpleaños de mi enamorada/novia/mamá/X es el ..."
+    (r"(?:el\s+)?cumplea[ñn]os\s+de\s+(?:mi\s+)?(\w+(?:\s+\w+)?)\s+es\s+(?:el\s+)?(.{4,25}?)(?:\.|,|$)", "relaciones", r"cumpleaños_\1", r"\2"),
     # Ciudad/país: "vivo en X", "soy de X"
     (r"(?:vivo en|soy de|estoy en)\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñA-ZÁÉÍÓÚÑ\s]{2,25})(?:\.|,|$)", "personal", "ubicacion", r"\1"),
-    # Trabajo/carrera: "estudio X", "trabajo en X", "soy estudiante de X"
+    # Trabajo/carrera: "estudio X", "trabajo en X"
     (r"(?:estudio|trabajo en|soy estudiante de|mi carrera es)\s+(.{3,40}?)(?:\.|,|$)", "personal", "ocupacion", r"\1"),
     # Preferencia explícita: "me gusta X", "prefiero X"
     (r"(?:me gusta(?:n)?|prefiero|me encanta(?:n)?)\s+(.{3,40}?)(?:\.|,|$)", "preferencia", "gusto", r"\1"),
+    # Recordatorio/evento: "recuérdame que el X debo/tengo/hay", "hazme recuerdo que el X"
+    (r"(?:rec[uú]erdame|hazme recuerdo|recuerda)\s+(?:que\s+)?(?:el\s+)?(.{5,50}?)(?:\.|,|$)", "reminder", "recordatorio", r"\1"),
 ]
 
-def _extract_memory_by_regex(text: str) -> tuple[str, str, str] | None:
+def _extract_memory_by_regex(text: str) -> tuple | None:
     """
     Intenta extraer (category, key, value) de un input usando patrones regex.
     Retorna None si ningún patrón hace match.
     """
     lowered = text.lower().strip()
-    for pattern, category, key, value_group in _MEMORY_PATTERNS:
+    for item in _MEMORY_PATTERNS:
+        pattern, category, key_tmpl, value_group = item
         m = re.search(pattern, lowered, re.IGNORECASE)
         if m:
-            value = re.sub(pattern, value_group, m.group(0), flags=re.IGNORECASE).strip()
-            return category, key, value
+            # Construir key y value usando los grupos capturados
+            key = key_tmpl
+            value = value_group
+            for i, grp in enumerate(m.groups(), start=1):
+                if grp:
+                    key = key.replace(f"\\{i}", grp.strip())
+                    value = value.replace(f"\\{i}", grp.strip())
+            # Limpiar key: sin espacios raros, normalizar
+            key = re.sub(r"\s+", "_", key.strip())
+            return category, key, value.strip()
     return None
 
 def _async_extract_and_save_memory(user_input: str, client: OpenAI, model: str):

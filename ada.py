@@ -95,30 +95,79 @@ def get_client():
 
 # ─── Memoria asíncrona ────────────────────────────────────────────────────────
 
+# Patrones directos para datos personales comunes — no dependen del modelo
+_MEMORY_PATTERNS = [
+    # Edad: "tengo 20 años", "tengo 20", "mi edad es 20", "cumplo 21"
+    (r"(?:tengo|mi edad es|tiene|cumplo)\s+(\d{1,3})\s*a[ñn]os?", "personal", "edad", r"\1 años"),
+    # Nombre propio: "me llamo X", "mi nombre es X"
+    (r"(?:me llamo|mi nombre es|soy)\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)?)", "personal", "nombre", r"\1"),
+    # Cumpleaños: "mi cumpleaños es el 5 de abril", "nací el ..."
+    (r"(?:mi cumplea[ñn]os es(?: el)?|nac[ií](?: el)?)\s+(.{4,30}?)(?:\.|,|$)", "personal", "fecha_cumpleaños", r"\1"),
+    # Ciudad/país: "vivo en X", "soy de X"
+    (r"(?:vivo en|soy de|estoy en)\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñA-ZÁÉÍÓÚÑ\s]{2,25})(?:\.|,|$)", "personal", "ubicacion", r"\1"),
+    # Trabajo/carrera: "estudio X", "trabajo en X", "soy estudiante de X"
+    (r"(?:estudio|trabajo en|soy estudiante de|mi carrera es)\s+(.{3,40}?)(?:\.|,|$)", "personal", "ocupacion", r"\1"),
+    # Preferencia explícita: "me gusta X", "prefiero X"
+    (r"(?:me gusta(?:n)?|prefiero|me encanta(?:n)?)\s+(.{3,40}?)(?:\.|,|$)", "preferencia", "gusto", r"\1"),
+]
+
+def _extract_memory_by_regex(text: str) -> tuple[str, str, str] | None:
+    """
+    Intenta extraer (category, key, value) de un input usando patrones regex.
+    Retorna None si ningún patrón hace match.
+    """
+    lowered = text.lower().strip()
+    for pattern, category, key, value_group in _MEMORY_PATTERNS:
+        m = re.search(pattern, lowered, re.IGNORECASE)
+        if m:
+            value = re.sub(pattern, value_group, m.group(0), flags=re.IGNORECASE).strip()
+            return category, key, value
+    return None
+
 def _async_extract_and_save_memory(user_input: str, client: OpenAI, model: str):
     """
-    Worker en segundo plano: analiza el input y guarda memoria si corresponde.
+    Worker en segundo plano: extrae y guarda memoria si corresponde.
+    Prioridad: regex directo → modelo como fallback para datos libres.
     No bloquea la respuesta principal.
     """
-    if len(user_input.strip().split()) < 3:
+    stripped = user_input.strip()
+    if len(stripped.split()) < 3:
         return
-    if user_input.lower().strip() in {"hola", "buenos dias", "chau", "jaja", "xd"}:
+    if stripped.lower() in {"hola", "buenos dias", "chau", "jaja", "xd"}:
         return
 
+    # 1. Intento rápido por regex — confiable, 0ms, sin llamada al modelo
+    result = _extract_memory_by_regex(stripped)
+    if result:
+        category, key, value = result
+        memory.save_memory(category=category, key=key, value=value)
+        get_system_prompt(reload=True)
+        console.print(f"  [dim magenta]🧠 {key} → {value}[/dim magenta]")
+        return
+
+    # 2. Fallback al modelo solo si el input parece una instrucción de guardar
+    save_triggers = {
+        "guarda", "recuerda", "anota", "memoriza", "save", "remember",
+        "guarden", "guárdalo", "guardalo", "toma nota",
+    }
+    lowered = stripped.lower()
+    if not any(t in lowered for t in save_triggers):
+        return  # No parece una instrucción de guardar → ignorar
+
     extraction_prompt = (
-        "Analiza el siguiente texto. "
-        "Si contiene un dato personal del usuario (edad, cumpleaños, preferencia, proyecto, instrucción permanente), "
-        "extrae la información en JSON estrictamente válido con: "
+        "Extrae el dato personal del siguiente texto en JSON con estas llaves exactas: "
         "'should_save' (boolean), 'category' (string), 'key' (string), 'value' (string). "
-        "Si es charla casual o efímera, responde solo {\"should_save\": false}.\n\n"
-        f"Texto: \"{user_input}\""
+        "Si no hay dato personal que guardar, responde solo {\"should_save\": false}. "
+        "Responde SOLO el JSON, sin texto adicional.\n\n"
+        f"Texto: \"{stripped}\""
     )
 
     try:
         res = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": extraction_prompt}],
-            temperature=0.1
+            temperature=0.0,
+            max_tokens=80,
         )
         content = res.choices[0].message.content.strip()
 
@@ -126,16 +175,13 @@ def _async_extract_and_save_memory(user_input: str, client: OpenAI, model: str):
             json_str = content[content.find("{"):content.rfind("}") + 1]
             data = json.loads(json_str)
             if isinstance(data, dict) and data.get("should_save"):
-                memory.save_memory(
-                    category=str(data.get("category", "general")),
-                    key=str(data.get("key", "dato")),
-                    value=str(data.get("value", ""))
-                )
-                get_system_prompt(reload=True)
-                # Notificación visible discreta
-                key_label = data.get("key", "dato")
-                val_label = data.get("value", "")
-                console.print(f"  [dim magenta]🧠 {key_label} → {val_label}[/dim magenta]")
+                k = str(data.get("key", "dato")).strip()
+                v = str(data.get("value", "")).strip()
+                c = str(data.get("category", "general")).strip()
+                if k and v:
+                    memory.save_memory(category=c, key=k, value=v)
+                    get_system_prompt(reload=True)
+                    console.print(f"  [dim magenta]🧠 {k} → {v}[/dim magenta]")
     except Exception:
         pass
 

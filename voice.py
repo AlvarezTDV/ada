@@ -177,7 +177,7 @@ class VoiceEngine:
         stream = None
         frames = []
         
-        console.print("[bold cyan]🔴 GRABANDO VOZ... Presiona ENTER para DETENER Y ENVIAR AL INSTANTE.[/bold cyan]")
+        console.print("[dim magenta]Transcribiendo...[/dim magenta]")
         
         try:
             stream = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, frames_per_buffer=CHUNK)
@@ -200,7 +200,7 @@ class VoiceEngine:
                     pass
             p.terminate()
 
-        console.print("[dim magenta]🛑 Grabación detenida al instante. Transcribiendo...[/dim magenta]")
+        
 
         wav_buffer = io.BytesIO()
         wf = wave.open(wav_buffer, 'wb')

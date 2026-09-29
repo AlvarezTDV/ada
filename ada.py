@@ -34,70 +34,6 @@ MODE_EMOJI = {
 
 _CACHED_SYSTEM_PROMPT = None
 
-# ─── Detección de intención de borrado ────────────────────────────────────────
-
-_DELETE_VERBS = re.compile(
-    r"\b(olvida(?:te|r)?|borra(?:r)?|elimina(?:r)?|quita(?:r)?|remove|forget|delete|suprime|descarta)\b",
-    re.IGNORECASE,
-)
-
-# Mapeo de palabras clave a claves canónicas de la DB
-_DELETE_KEY_MAP = {
-    # Más específicos primero — evitan falsos positivos por substrings
-    "cumpleaños": "fecha_cumpleaños",
-    "cumpleanos": "fecha_cumpleaños",
-    "cumpleano": "fecha_cumpleaños",
-    "birthday": "fecha_cumpleaños",
-    "enamorada": "cumpleaños_enamorada",
-    "novia": "cumpleaños_enamorada",
-    "novio": "cumpleaños_novio",
-    "recordatorio": "recordatorio",
-    "reminder": "recordatorio",
-    "evento": "evento",
-    "ubicacion": "ubicacion",
-    "ciudad": "ubicacion",
-    "pais": "ubicacion",
-    "location": "ubicacion",
-    "ocupacion": "ocupacion",
-    "trabajo": "ocupacion",
-    "carrera": "ocupacion",
-    "estudio": "ocupacion",
-    "nombre": "nombre",
-    "name": "nombre",
-    # Edad al final para no matchear "años" dentro de "cumpleanos"
-    "edad": "edad",
-    "anios": "edad",
-    "anos": "edad",
-    "años": "edad",
-    "age": "edad",
-}
-
-def _detect_delete_intent(text: str) -> str | None:
-    """
-    Retorna la clave/keyword objetivo si el input es una orden de olvidar/borrar.
-    Ej: 'olvida que tengo 20 años' → 'edad'
-    Retorna None si no es una orden de borrado.
-    """
-    lowered = text.lower().strip()
-    if not _DELETE_VERBS.search(lowered):
-        return None
-
-    # Aislar el sujeto: quitar verbo y palabras puente
-    subject = _DELETE_VERBS.sub("", lowered)
-    subject = re.sub(
-        r"\b(que|lo de|mi|mis|el dato de|la info de|de que|puedes|por favor|tengo|soy|es|el|la|un|una|\d+)\b",
-        " ", subject
-    )
-    subject = re.sub(r"\s{2,}", " ", subject).strip(" .,")
-
-    # Intentar mapear a clave canónica
-    for palabra, clave in _DELETE_KEY_MAP.items():
-        if palabra in subject:
-            return clave
-
-    # Fallback: devolver el sujeto limpio como keyword fuzzy
-    return subject if len(subject) >= 2 else None
-
 # ─── System Prompt ─────────────────────────────────────────────────────────────
 
 def get_system_prompt(reload: bool = False) -> str:
@@ -131,119 +67,92 @@ def get_client():
 
     return OpenAI(base_url=DEFAULT_LOCAL_URL, api_key="not-needed"), DEFAULT_MODEL
 
-# ─── Memoria asíncrona ────────────────────────────────────────────────────────
+# ─── Procesamiento de Memoria Síncrono (FASE 1 y 2) ───────────────────────────
 
-# Patrones directos para datos personales comunes — no dependen del modelo
-_MEMORY_PATTERNS = [
-    # Edad: "tengo 20 años", "mi edad es 20", "cumplo 21"
-    (r"(?:tengo|mi edad es|tiene|cumplo)\s+(\d{1,3})\s*a[ñn]os?", "personal", "edad", r"\1 años"),
-    # Nombre propio: "me llamo X", "mi nombre es X"
-    (r"(?:me llamo|mi nombre es|soy)\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)?)", "personal", "nombre", r"\1"),
-    # Mi cumpleaños: "mi cumpleaños es el 5 de abril", "nací el ..."
-    (r"(?:mi cumplea[ñn]os es(?: el)?|nac[ií](?: el)?)\s+(.{4,30}?)(?:\.|,|$)", "personal", "fecha_cumpleaños", r"\1"),
-    # Cumpleaños de tercero: "el cumpleaños de mi enamorada/novia/mamá/X es el ..."
-    (r"(?:el\s+)?cumplea[ñn]os\s+de\s+(?:mi\s+)?(\w+(?:\s+\w+)?)\s+es\s+(?:el\s+)?(.{4,25}?)(?:\.|,|$)", "relaciones", r"cumpleaños_\1", r"\2"),
-    # Ciudad/país: "vivo en X", "soy de X"
-    (r"(?:vivo en|soy de|estoy en)\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñA-ZÁÉÍÓÚÑ\s]{2,25})(?:\.|,|$)", "personal", "ubicacion", r"\1"),
-    # Trabajo/carrera: "estudio X", "trabajo en X"
-    (r"(?:estudio|trabajo en|soy estudiante de|mi carrera es)\s+(.{3,40}?)(?:\.|,|$)", "personal", "ocupacion", r"\1"),
-    # Preferencia explícita: "me gusta X", "prefiero X"
-    (r"(?:me gusta(?:n)?|prefiero|me encanta(?:n)?)\s+(.{3,40}?)(?:\.|,|$)", "preferencia", "gusto", r"\1"),
-    # Recordatorio/evento: "recuérdame que el X debo/tengo/hay", "hazme recuerdo que el X"
-    (r"(?:rec[uú]erdame|hazme recuerdo|recuerda)\s+(?:que\s+)?(?:el\s+)?(.{5,50}?)(?:\.|,|$)", "reminder", "recordatorio", r"\1"),
-]
-
-def _extract_memory_by_regex(text: str) -> tuple | None:
+def process_memory_sync(user_input: str, client, model: str) -> tuple[str, any]:
     """
-    Intenta extraer (category, key, value) de un input usando patrones regex.
-    Retorna None si ningún patrón hace match.
-    """
-    lowered = text.lower().strip()
-    for item in _MEMORY_PATTERNS:
-        pattern, category, key_tmpl, value_group = item
-        m = re.search(pattern, lowered, re.IGNORECASE)
-        if m:
-            # Construir key y value usando los grupos capturados
-            key = key_tmpl
-            value = value_group
-            for i, grp in enumerate(m.groups(), start=1):
-                if grp:
-                    key = key.replace(f"\\{i}", grp.strip())
-                    value = value.replace(f"\\{i}", grp.strip())
-            # Limpiar key: sin espacios raros, normalizar
-            key = re.sub(r"\s+", "_", key.strip())
-            return category, key, value.strip()
-    return None
-
-def _async_extract_and_save_memory(user_input: str, client: OpenAI, model: str):
-    """
-    Worker en segundo plano: extrae y guarda memoria si corresponde.
-    Prioridad: regex directo → modelo como fallback para datos libres.
-    No bloquea la respuesta principal.
+    Analiza el input usando el LLM de forma síncrona para decidir la acción de memoria.
+    Retorna (accion, datos).
+    Acciones: GUARDAR, BORRAR, CONSULTAR, NADA.
     """
     stripped = user_input.strip()
-    if len(stripped.split()) < 3:
-        return
-    if stripped.lower() in {"hola", "buenos dias", "chau", "jaja", "xd"}:
-        return
+    if len(stripped.split()) < 2 or stripped.lower() in {"hola", "buenos dias", "chau", "jaja", "xd"}:
+        return "NADA", None
 
-    # 1. Intento rápido por regex — confiable, 0ms, sin llamada al modelo
-    result = _extract_memory_by_regex(stripped)
-    if result:
-        category, key, value = result
-        memory.save_memory(category=category, key=key, value=value)
-        get_system_prompt(reload=True)
-        console.print(f"  [dim magenta]🧠 {key} → {value}[/dim magenta]")
-        return
+    # FASE 1: Clasificación de intención (rápida, 1 sola palabra)
+    prompt_class = f"""Clasifica el siguiente texto en exactamente UNA palabra: GUARDAR, BORRAR, CONSULTAR o NADA.
+- GUARDAR: (El usuario pide memorizar un dato nuevo o agendar un recordatorio) Ej: "tengo 20 años", "anota esto", "guarda que me gustan las fresas", "recuérdame salir a las 10", "hazme recuerdo de que tengo clases mañana"
+- BORRAR: (El usuario pide eliminar un dato) Ej: "olvida mi edad", "borra lo de las fresas", "elimina el recordatorio"
+- CONSULTAR: (El usuario pregunta por su información YA guardada) Ej: "¿qué sabes de mí?", "¿cuándo es mi cumpleaños?", "¿qué te dije ayer?", "¿recuerdas mi edad?"
+- NADA: (Conversación general) Ej: "hola", "qué es python", "escribe un poema", "ayúdame con algo"
 
-    # 2. Fallback al modelo solo si el input parece una instrucción de guardar
-    save_triggers = {
-        "guarda", "recuerda", "anota", "memoriza", "save", "remember",
-        "guarden", "guárdalo", "guardalo", "toma nota",
-    }
-    lowered = stripped.lower()
-    if not any(t in lowered for t in save_triggers):
-        return  # No parece una instrucción de guardar → ignorar
-
-    extraction_prompt = (
-        "Extrae el dato personal del siguiente texto en JSON con estas llaves exactas: "
-        "'should_save' (boolean), 'category' (string), 'key' (string), 'value' (string). "
-        "Si no hay dato personal que guardar, responde solo {\"should_save\": false}. "
-        "Responde SOLO el JSON, sin texto adicional.\n\n"
-        f"Texto: \"{stripped}\""
-    )
+Texto: "{stripped}"
+Respuesta (1 sola palabra):"""
 
     try:
-        res = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": extraction_prompt}],
-            temperature=0.0,
-            max_tokens=80,
-        )
-        content = res.choices[0].message.content.strip()
+        with console.status("[dim magenta]Ada analizando memoria...[/dim magenta]"):
+            res_class = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt_class}],
+                temperature=0.0,
+                max_tokens=10
+            )
+        intent = res_class.choices[0].message.content.strip().upper()
 
-        if "{" in content and "}" in content:
-            json_str = content[content.find("{"):content.rfind("}") + 1]
-            data = json.loads(json_str)
-            if isinstance(data, dict) and data.get("should_save"):
-                k = str(data.get("key", "dato")).strip()
-                v = str(data.get("value", "")).strip()
-                c = str(data.get("category", "general")).strip()
-                if k and v:
-                    memory.save_memory(category=c, key=k, value=v)
-                    get_system_prompt(reload=True)
-                    console.print(f"  [dim magenta]🧠 {k} → {v}[/dim magenta]")
+        # FASE 2: Extracción dependiendo de la intención
+        if "GUARDAR" in intent:
+            prompt_ext = f"""Extrae el dato del texto en formato JSON. Usa estas llaves: "category", "key", "value".
+Ejemplos:
+Texto: "tengo 20 años" -> {{"category": "personal", "key": "edad", "value": "20 años"}}
+Texto: "me gustan las fresas" -> {{"category": "preferencia", "key": "gusto", "value": "fresas"}}
+Texto: "recuérdame salir a las 10" -> {{"category": "recordatorio", "key": "salir", "value": "a las 10"}}
+
+Texto: "{stripped}"
+JSON:"""
+            res_ext = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt_ext}],
+                temperature=0.0,
+                max_tokens=80
+            )
+            content = res_ext.choices[0].message.content.strip()
+            if "{" in content and "}" in content:
+                json_str = content[content.find("{"):content.rfind("}") + 1]
+                data = json.loads(json_str)
+                return "GUARDAR", data
+            return "NADA", None
+
+        elif "BORRAR" in intent:
+            import memory
+            memories = memory.get_all_memories()
+            if not memories:
+                return "NADA", None
+            # Construir lista de claves disponibles para que el modelo elija
+            mem_list = ", ".join([f"'{m[1]}'" for m in memories])
+            prompt_del = f"""El usuario quiere borrar un dato de su memoria.
+Memorias actuales (claves): {mem_list}
+
+Texto del usuario: "{stripped}"
+¿Qué clave de la lista quiere borrar? Responde SOLO con el nombre exacto de la clave, o NO_ENCONTRADO si no hay coincidencia.
+Clave:"""
+            res_del = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt_del}],
+                temperature=0.0,
+                max_tokens=20
+            )
+            clave = res_del.choices[0].message.content.strip()
+            if clave != "NO_ENCONTRADO" and clave:
+                return "BORRAR", clave
+            return "NADA", None
+
+        elif "CONSULTAR" in intent:
+            return "CONSULTAR", None
+
     except Exception:
-        pass
+        pass # Falla silenciosa -> decae a NADA
 
-def schedule_memory_check(user_input: str, client: OpenAI, model: str):
-    """Lanza el análisis de memoria en un hilo secundario (latencia 0ms)."""
-    t = threading.Thread(
-        target=_async_extract_and_save_memory,
-        args=(user_input, client, model),
-        daemon=True
-    )
-    t.start()
+    return "NADA", None
 
 # ─── Clasificación de modo ────────────────────────────────────────────────────
 
@@ -432,29 +341,38 @@ def chat_loop():
                 voice_engine.speak(farewell)
                 break
 
-            # ── Detección de borrado de memoria por orden directa ─────────────
-            delete_keyword = _detect_delete_intent(user_input)
-            if delete_keyword:
-                deleted_keys = memory.delete_memory_fuzzy(delete_keyword)
+            # ── Procesamiento de memoria síncrono ─────────────────────────────
+            mem_action, mem_data = process_memory_sync(user_input, client, model)
+            context_hint = ""
+
+            if mem_action == "GUARDAR" and isinstance(mem_data, dict):
+                k = str(mem_data.get("key", "")).strip()
+                v = str(mem_data.get("value", "")).strip()
+                c_cat = str(mem_data.get("category", "general")).strip()
+                if k and v:
+                    memory.save_memory(category=c_cat, key=k, value=v)
+                    get_system_prompt(reload=True)
+                    console.print(f"  [dim magenta]🧠 {k} → {v}[/dim magenta]")
+                    context_hint = " (Nota interna para Ada: Acabas de guardar este dato en tu memoria. Confirma brevemente que lo anotaste)."
+
+            elif mem_action == "BORRAR" and isinstance(mem_data, str):
+                deleted_keys = memory.delete_memory_fuzzy(mem_data)
                 get_system_prompt(reload=True)
                 if deleted_keys:
                     for k in deleted_keys:
                         console.print(f"  [dim magenta]🗑️  Olvidado: {k}[/dim magenta]")
-                    confirmation = "Olvidado, Dante."
+                    context_hint = " (Nota interna para Ada: Acabas de borrar este dato de tu memoria. Confirma brevemente que lo olvidaste)."
                 else:
-                    confirmation = "No encontré nada que olvidar sobre eso."
-                print_ada_response(confirmation, "casual")
-                voice_engine.speak(confirmation)
-                messages.append({"role": "user", "content": user_input})
-                messages.append({"role": "assistant", "content": confirmation})
-                continue
+                    context_hint = " (Nota interna para Ada: El usuario pidió borrar algo, pero no encontraste nada relacionado en tu memoria. Indícaselo)."
 
-            # ── Análisis de memoria en segundo plano ──────────────────────────
-            schedule_memory_check(user_input, client, model)
+            elif mem_action == "CONSULTAR":
+                context_hint = " (Nota interna para Ada: El usuario está preguntando por su información personal. Revisa la 'MEMORIA PERSISTENTE DE ADA' en tu system prompt y responde explícitamente en base a esos datos)."
 
             # ── Actualizar system prompt con memoria actual ────────────────────
             messages[0] = {"role": "system", "content": get_system_prompt()}
-            messages.append({"role": "user", "content": user_input})
+            
+            final_user_input = user_input + context_hint if context_hint else user_input
+            messages.append({"role": "user", "content": final_user_input})
 
             # Ventana de contexto deslizante (últimos 10 mensajes)
             if len(messages) > 11:

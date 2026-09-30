@@ -73,6 +73,8 @@ def execute_memory_command(text: str, client: OpenAI, model: str) -> str | None:
     if re.search(SAVE_TRIGGERS, lowered):
         prompt = f"""El usuario dio una orden directa de guardar información.
 Extrae los datos en un array de JSON. Cada objeto debe tener: "category", "key", "value".
+REGLAS ESTRICTAS:
+- El campo "key" DEBE estar siempre en ESPAÑOL, ser descriptivo y usar guiones bajos (ej: edad, color_favorito, fecha_cumpleaños). ¡Nunca en inglés!
 Texto: "{text}"
 Responde ÚNICAMENTE con el array JSON válido."""
         try:
@@ -104,8 +106,9 @@ Responde ÚNICAMENTE con el array JSON válido."""
         keys = [m[1] for m in memories]
         prompt = f"""El usuario ordenó borrar un dato.
 Claves actuales en memoria: {keys}
-Texto: "{text}"
-¿Qué claves quiere borrar? Responde ÚNICAMENTE con un array JSON de strings con las claves exactas de la lista. Si no hay coincidencias, responde []."""
+Texto del usuario: "{text}"
+¿A cuál clave de la lista se refiere el usuario por contexto o sinónimos? (Ej: si dice "mis años" y en la lista está "edad", debes deducir "edad").
+Responde ÚNICAMENTE con un array JSON de strings con las claves de la lista que coincidan lógicamente. Si no hay coincidencias semánticas, responde []."""
         try:
             with console.status("[dim magenta]Procesando orden de borrado...[/dim magenta]"):
                 res = client.chat.completions.create(

@@ -74,14 +74,14 @@ def get_all_memories():
 
 def format_memories_for_prompt() -> str:
     memories = get_all_memories()
-    formatted = "\n=== BASE DE DATOS DE MEMORIA PERSISTENTE ===\n"
-    formatted += "AQUÍ ESTÁ LA INFORMACIÓN QUE SABES SOBRE DANTE. LÉELA DIRECTAMENTE PARA RESPONDER A SUS CONSULTAS.\n\n"
+    formatted = "\n=== RECUERDOS Y CONOCIMIENTOS SOBRE DANTE ===\n"
+    formatted += "(USA ESTA INFORMACIÓN PARA CONVERSAR NATURALMENTE. ASIMÍLALA COMO SI FUERA TU PROPIA MEMORIA. PROHIBIDO MENCIONAR LAS PALABRAS 'CLAVE', 'BASE DE DATOS', O 'CATEGORÍA' AL HABLAR).\n\n"
     if not memories:
-        formatted += "(La memoria está vacía actualmente)\n"
+        formatted += "(No tienes recuerdos guardados actualmente)\n"
     else:
         for cat, key, val in memories:
-            formatted += f"- Clave: '{key}' | Dato: '{val}' | Categoría: '{cat}'\n"
-    formatted += "============================================\n"
+            formatted += f"- [Tema: {cat}] {key}: {val}\n"
+    formatted += "=============================================\n"
     return formatted
 
 if __name__ == "__main__":

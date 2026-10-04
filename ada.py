@@ -172,11 +172,12 @@ def print_header():
     console.print()
     console.print(Align.center(Text(title_art.rstrip(), style="bold magenta")))
     console.print(Align.center(Text("Advanced Desktop Assistant", style="dim magenta")))
-    console.print(Align.center(Text("- " * 24, style="magenta")))
+    console.print(Align.center(Text("- " * 30, style="magenta")))
     console.print()
 
 def print_ada_response(text: str, mode: str):
     emoji = MODE_EMOJI.get(mode, "💬")
+    # Al no fijar el width, el Panel se adaptará automáticamente al ancho de la terminal al momento de imprimirse
     console.print(Panel(text, title=f"[bold magenta]Ada {emoji}[/bold magenta]", title_align="left", border_style="magenta", padding=(0, 1)))
 
 # ─── Bucle Principal ──────────────────────────────────────────────────────────
@@ -200,8 +201,15 @@ def chat_loop():
                 user_input = typed_input
             else:
                 user_input = voice_engine.listen_manual_push()
+                
+                # Magia ANSI: Borramos visualmente los 2 saltos de línea (ENTER para iniciar y ENTER para detener)
+                # Subimos una línea y limpiamos (\033[1A\033[2K), y lo hacemos 2 veces.
+                sys.stdout.write("\033[1A\033[2K\033[1A\033[2K\r")
+                sys.stdout.flush()
+                
                 if user_input:
-                    console.print(f"[dim]💬 {user_input}[/dim]")
+                    # Reescribimos el prompt original pero esta vez con la voz transcrita en la misma línea
+                    console.print(f"[bold magenta]🔴[/bold magenta] > [dim]{user_input}[/dim]")
 
             if not user_input:
                 continue

@@ -6,12 +6,11 @@ import re
 import sys
 import asyncio
 import threading
-import queue
 import edge_tts
 import tempfile
 import pyttsx3
 import pygame
-import speech_recognition as sr
+from faster_whisper import WhisperModel
 from rich.console import Console
 
 console = Console()
@@ -19,8 +18,10 @@ console = Console()
 class VoiceEngine:
     def __init__(self, mode="edge"):
         self.mode = mode
-        self.recognizer = sr.Recognizer()
         self.edge_voice = "es-MX-DaliaNeural"
+        
+        # Cargar el modelo local de Whisper (quantizado a int8 para CPU) para máxima velocidad y privacidad
+        self.whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
         
         try:
             pygame.mixer.init()
@@ -145,26 +146,9 @@ class VoiceEngine:
         except Exception:
             pass
 
-    def _get_key_hit(self):
-        """Abstracción multiplataforma para detectar si se presionó la tecla ENTER."""
-        if sys.platform == "win32":
-            import msvcrt
-            if msvcrt.kbhit():
-                key = msvcrt.getch()
-                return key in [b'\r', b'\n']
-            return False
-        else:
-            # En Linux/macOS usar la entrada estándar sin bloqueo (select)
-            import select
-            dr, _, _ = select.select([sys.stdin], [], [], 0)
-            if dr:
-                sys.stdin.readline()
-                return True
-            return False
-
     def listen_manual_push(self) -> str:
         """
-        Push-To-Talk multiplataforma con gestión garantizada de recursos de audio (`try...finally`).
+        Push-To-Talk con gestión garantizada y eventos de consola puros (Sin msvcrt).
         """
         import pyaudio
         
@@ -177,16 +161,21 @@ class VoiceEngine:
         stream = None
         frames = []
         
-        console.print("[dim magenta]Transcribiendo...[/dim magenta]")
+        stop_event = threading.Event()
+        
+        def wait_for_enter():
+            input()
+            stop_event.set()
+            
+        # Hilo en segundo plano que espera el próximo ENTER de forma nativa multiplataforma
+        threading.Thread(target=wait_for_enter, daemon=True).start()
         
         try:
             stream = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, frames_per_buffer=CHUNK)
-            while True:
+            while not stop_event.is_set():
                 data = stream.read(CHUNK, exception_on_overflow=False)
                 frames.append(data)
                 
-                if self._get_key_hit():
-                    break
         except Exception as e:
             console.print(f"[red]Error abriendo/leyendo micrófono: {e}[/red]")
             return ""
@@ -200,26 +189,18 @@ class VoiceEngine:
                     pass
             p.terminate()
 
+        import numpy as np
+        audio_data = b''.join(frames)
         
-
-        wav_buffer = io.BytesIO()
-        wf = wave.open(wav_buffer, 'wb')
-        wf.setnchannels(CHANNELS)
-        wf.setsampwidth(p.get_sample_size(FORMAT))
-        wf.setframerate(RATE)
-        wf.writeframes(b''.join(frames))
-        wf.close()
-        
-        wav_buffer.seek(0)
+        # Convertir el audio crudo PCM de 16-bit a matriz Numpy Float32 (Requisito nativo de Whisper)
+        # ¡Esto evita escribir archivos en el disco duro y soluciona bloqueos en Windows!
+        audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
         
         try:
-            with sr.AudioFile(wav_buffer) as source:
-                audio = self.recognizer.record(source)
-                text = self.recognizer.recognize_google(audio, language="es-ES")
-                return text
-        except sr.UnknownValueError:
-            console.print("[dim red]No logré entender el audio.[/dim red]")
-            return ""
+            # Transcripción offline 100% privada usando faster-whisper directamente desde la memoria RAM
+            segments, info = self.whisper_model.transcribe(audio_np, language="es")
+            text = " ".join([segment.text for segment in segments]).strip()
+            return text
         except Exception as e:
             console.print(f"[red]Error procesando transcripción: {e}[/red]")
             return ""

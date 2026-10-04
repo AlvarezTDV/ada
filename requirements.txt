@@ -1,7 +1,7 @@
 openai>=1.10.0
 rich>=13.0.0
 pyttsx3>=2.90
-SpeechRecognition>=3.10.0
+faster-whisper>=1.0.0
 PyAudio>=0.2.14
 edge-tts>=7.0.0
 pygame>=2.5.0

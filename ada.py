@@ -78,7 +78,7 @@ REGLAS ESTRICTAS:
 Texto: "{text}"
 Responde ÚNICAMENTE con el array JSON válido."""
         try:
-            with console.status("[dim magenta]Procesando orden de guardado...[/dim magenta]"):
+            with console.status("[dim #fd2636]Procesando orden de guardado...[/dim #fd2636]"):
                 res = client.chat.completions.create(
                     model=model, messages=[{"role": "user", "content": prompt}],
                     temperature=0.0, max_tokens=150
@@ -90,7 +90,7 @@ Responde ÚNICAMENTE con el array JSON válido."""
                 data = json.loads(match.group(0))
                 memory.save_memories(data)
                 for item in data:
-                    console.print(f"  [dim magenta]🧠 Anotado: {item.get('key')} -> {item.get('value')}[/dim magenta]")
+                    console.print(f"  [dim #fd2636]🧠 Anotado: {item.get('key')} -> {item.get('value')}[/dim #fd2636]")
                 return "Información guardada, Dante."
         except Exception:
             pass
@@ -110,7 +110,7 @@ Texto del usuario: "{text}"
 ¿A cuál clave de la lista se refiere el usuario por contexto o sinónimos? (Ej: si dice "mis años" y en la lista está "edad", debes deducir "edad").
 Responde ÚNICAMENTE con un array JSON de strings con las claves de la lista que coincidan lógicamente. Si no hay coincidencias semánticas, responde []."""
         try:
-            with console.status("[dim magenta]Procesando orden de borrado...[/dim magenta]"):
+            with console.status("[dim #fd2636]Procesando orden de borrado...[/dim #fd2636]"):
                 res = client.chat.completions.create(
                     model=model, messages=[{"role": "user", "content": prompt}],
                     temperature=0.0, max_tokens=50
@@ -122,7 +122,7 @@ Responde ÚNICAMENTE con un array JSON de strings con las claves de la lista que
                 if keys_to_delete:
                     deleted = memory.delete_memories(keys_to_delete)
                     for k in deleted:
-                        console.print(f"  [dim magenta]🗑️ Olvidado: {k}[/dim magenta]")
+                        console.print(f"  [dim #fd2636]🗑️ Olvidado: {k}[/dim #fd2636]")
                     return "Información eliminada de mi base de datos."
                 else:
                     return "No encontré ese dato en mi memoria para borrarlo."
@@ -170,15 +170,15 @@ def classify_input_mode(text: str) -> dict:
 def print_header():
     title_art = pyfiglet.figlet_format("A.D.A", font="slant")
     console.print()
-    console.print(Align.center(Text(title_art.rstrip(), style="bold magenta")))
-    console.print(Align.center(Text("Advanced Desktop Assistant", style="dim magenta")))
-    console.print(Align.center(Text("- " * 30, style="magenta")))
+    console.print(Align.center(Text(title_art.rstrip(), style="bold #fd2636")))
+    console.print(Align.center(Text("Advanced Desktop Assistant", style="dim #fd2636")))
+    console.print(Align.center(Text("- " * 30, style="#fd2636")))
     console.print()
 
 def print_ada_response(text: str, mode: str):
     emoji = MODE_EMOJI.get(mode, "💬")
     # Al no fijar el width, el Panel se adaptará automáticamente al ancho de la terminal al momento de imprimirse
-    console.print(Panel(text, title=f"[bold magenta]Ada {emoji}[/bold magenta]", title_align="left", border_style="magenta", padding=(0, 1)))
+    console.print(Panel(text, title=f"[bold #fd2636]Ada {emoji}[/bold #fd2636]", title_align="left", border_style="#fd2636", padding=(0, 1)))
 
 # ─── Bucle Principal ──────────────────────────────────────────────────────────
 
@@ -194,7 +194,7 @@ def chat_loop():
     while True:
         try:
             user_input = ""
-            console.print("[bold magenta]🔴[/bold magenta] ", end="")
+            console.print("[bold #fd2636]🔴[/bold #fd2636] ", end="")
             typed_input = input("> ").strip()
 
             if typed_input:
@@ -209,7 +209,7 @@ def chat_loop():
                 
                 if user_input:
                     # Reescribimos el prompt original pero esta vez con la voz transcrita en la misma línea
-                    console.print(f"[bold magenta]🔴[/bold magenta] > [dim]{user_input}[/dim]")
+                    console.print(f"[bold #fd2636]🔴[/bold #fd2636] > [dim]{user_input}[/dim]")
 
             if not user_input:
                 continue
@@ -245,7 +245,7 @@ def chat_loop():
             mode, temperature, max_tokens, think = mode_info["mode"], mode_info["temperature"], mode_info["max_tokens"], mode_info["think"]
 
             think_label = "Ada razonando..." if think else "Ada..."
-            with console.status(f"[dim magenta]{think_label}[/dim magenta]"):
+            with console.status(f"[dim #fd2636]{think_label}[/dim #fd2636]"):
                 response = client.chat.completions.create(
                     model=model, messages=messages, temperature=temperature, max_tokens=max_tokens,
                     extra_body={"options": {"think": think, "num_ctx": 2048}},
@@ -253,7 +253,7 @@ def chat_loop():
             ada_response = response.choices[0].message.content.strip()
 
             if not ada_response:
-                with console.status("[dim magenta]Reintentando...[/dim magenta]"):
+                with console.status("[dim #fd2636]Reintentando...[/dim #fd2636]"):
                     fallback_response = client.chat.completions.create(
                         model=model, messages=messages, temperature=temperature, max_tokens=max_tokens * 3,
                         extra_body={"options": {"think": False, "num_ctx": 2048}},
@@ -268,7 +268,7 @@ def chat_loop():
             voice_engine.speak(ada_response)
 
         except KeyboardInterrupt:
-            console.print("\n[dim magenta]Nos vemos, Dante.[/dim magenta]")
+            console.print("\n[dim #fd2636]Nos vemos, Dante.[/dim #fd2636]")
             break
         except Exception as e:
             console.print(f"\n[red]❌ {e}[/red]\n")

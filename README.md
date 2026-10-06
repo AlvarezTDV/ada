@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/brand/ada-banner.gif" alt="A.D.A Animated Banner" width="100%">
+</p>
+
 # A.D.A. (Advanced Desktop Assistant)
 
 A.D.A es un asistente conversacional personal diseñado para ejecutarse localmente en tu máquina. Prioriza la privacidad absoluta (cero envíos a la nube), respuestas ultrarrápidas y una memoria persistente a largo plazo.
@@ -13,7 +17,7 @@ A.D.A es un asistente conversacional personal diseñado para ejecutarse localmen
 
 - Python 3.10 o superior.
 - [Ollama](https://ollama.com/) ejecutándose localmente con el modelo configurado.
-- (Recomendado) Entorno Windows/Linux/macOS; el código es 100% multiplataforma.
+- Entorno Windows/Linux/macOS.
 
 ## 🚀 Instalación
 
@@ -47,7 +51,7 @@ Puedes darle comandos directos a A.D.A para que aprenda o se olvide de cosas. De
   - Ej: *"Por favor guarda que soy ingeniero de software."*
 - **Para Borrar datos:** Usa palabras como *"Borra"*, *"Olvida"*, *"Elimina"*.
   - Ej: *"Borra que me llamo Vicente."*
-  - Ej: *"Olvida mi edad."* (A.D.A usa inferencia semántica para entender a qué dato te refieres, incluso si usas sinónimos).
+  - Ej: *"Olvida mi edad."*
 
 ---
-*Si deseas entender a profundidad cómo funciona el motor interno, por qué es tan rápido y qué problemas arquitectónicos superamos, revisa el archivo [ARCHITECTURE.md](ARCHITECTURE.md).*
+*Revisa el archivo [ARCHITECTURE.md](ARCHITECTURE.md) para más información sobre el proyecto.*

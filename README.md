@@ -63,6 +63,26 @@ Puedes darle comandos directos a A.D.A para que aprenda o se olvide de cosas. De
   - Ej: *"Borra mi edad."*
   - Ej: *"Olvida mi edad."*
 
+## Prompt tests
+
+Run the offline regression tests without starting audio hardware or a language model:
+
+```bash
+python -B -m unittest discover -s tests -v
+```
+
+The tests use temporary SQLite databases, never your `ada_memory.db`. They check that the storage-disclosure rule has a single source in `system_prompt.txt`, memory-as-data/current-turn guidance, prompt composition, and cache/reload behavior. The memory context does not duplicate the disclosure rule. These checks do not prove that a language model follows the instructions.
+
+For a bounded behavioral evaluation, start Ollama with the configured default model (`qwen2.5:3b`), then opt in from PowerShell:
+
+```powershell
+$env:ADA_RUN_MODEL_EVALS = "1"
+python -B -m unittest discover -s tests -v
+Remove-Item Env:ADA_RUN_MODEL_EVALS
+```
+
+This evaluation sends three synthetic examples only to `127.0.0.1:11434`: a current preference overriding a stored one, an instruction embedded in a memory, and a direct storage question. It uses no cloud credentials, personal memories, or audio. Each request has a 30-second timeout and no retries. A missing server/model or a mismatched response fails the evaluation; a successful run is evidence for these examples, not a general prompt-injection guarantee.
+
 ## Etiquetas de versión
 
 Use annotated Semantic Versioning tags in `vMAJOR.MINOR.PATCH` format. Format each tag message as `Release vX.Y.Z: <concise change summary>`.

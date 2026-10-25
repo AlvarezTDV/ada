@@ -39,7 +39,7 @@ def get_system_prompt(reload: bool = False) -> str:
             with open("system_prompt.txt", "r", encoding="utf-8") as f:
                 base_prompt = f.read().strip()
         except FileNotFoundError:
-            base_prompt = "Eres A.D.A, la asistente de Dante."
+            base_prompt = "Eres A.D.A., una asistente de IA personal."
 
         mem_context = memory.format_memories_for_prompt()
         _CACHED_SYSTEM_PROMPT = f"{base_prompt}\n\n{mem_context}"
@@ -91,7 +91,7 @@ Responde ÚNICAMENTE con el array JSON válido."""
                 memory.save_memories(data)
                 for item in data:
                     console.print(f"  [dim #fd2636]🧠 Anotado: {item.get('key')} -> {item.get('value')}[/dim #fd2636]")
-                return "Información guardada, Dante."
+                return "Información guardada."
         except Exception:
             pass
         return "Hubo un error al intentar extraer y guardar la información."
@@ -215,7 +215,7 @@ def chat_loop():
                 continue
 
             if user_input.strip().lower() in {"salir", "exit", "quit"}:
-                farewell = "Hasta luego, Dante."
+                farewell = "Hasta luego."
                 print_ada_response(farewell, "casual")
                 voice_engine.speak(farewell)
                 break
@@ -268,7 +268,7 @@ def chat_loop():
             voice_engine.speak(ada_response)
 
         except KeyboardInterrupt:
-            console.print("\n[dim #fd2636]Nos vemos, Dante.[/dim #fd2636]")
+            console.print("\n[dim #fd2636]Nos vemos.[/dim #fd2636]")
             break
         except Exception as e:
             console.print(f"\n[red]❌ {e}[/red]\n")

@@ -31,6 +31,16 @@ A.D.A es un asistente conversacional personal diseñado para ejecutarse localmen
    ollama run qwen2.5:3b
    ```
 
+### Error 403 al generar audio
+
+Si Edge TTS devuelve `403, message='Invalid response status'`, actualiza la dependencia en el mismo entorno de Python que ejecuta ADA y reinicia el asistente:
+
+```bash
+python -m pip install --upgrade "edge-tts>=7.3.1"
+```
+
+La versión mínima requerida incluye el protocolo Sec-MS-GEC v2 y una corrección del procesamiento de la fecha del servidor. La actualización corrige esa incompatibilidad; no garantiza resolver todos los errores 403. Consulta las [notas de las versiones 7.3.0 y 7.3.1](https://github.com/rany2/edge-tts/releases).
+
 ## 🎮 Uso del Asistente
 
 Para encender a A.D.A, simplemente ejecuta el script principal:
@@ -47,11 +57,15 @@ python ada.py
 Puedes darle comandos directos a A.D.A para que aprenda o se olvide de cosas. Debes empezar tu frase con palabras clave:
 
 - **Para Guardar datos:** Usa palabras como *"Anota"*, *"Guarda"*, *"Memoriza"*.
-  - Ej: *"Anota que mi nombre es Dante."*
+  - Ej: *"Anota que prefiero el té verde."*
   - Ej: *"Por favor guarda que soy ingeniero de software."*
 - **Para Borrar datos:** Usa palabras como *"Borra"*, *"Olvida"*, *"Elimina"*.
-  - Ej: *"Borra que me llamo Vicente."*
+  - Ej: *"Borra mi edad."*
   - Ej: *"Olvida mi edad."*
+
+## Etiquetas de versión
+
+Use annotated Semantic Versioning tags in `vMAJOR.MINOR.PATCH` format. Format each tag message as `Release vX.Y.Z: <concise change summary>`.
 
 ---
 *Revisa el archivo [ARCHITECTURE.md](ARCHITECTURE.md) para más información sobre el proyecto.*

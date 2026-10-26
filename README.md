@@ -81,7 +81,7 @@ python -B -m unittest discover -s tests -v
 Remove-Item Env:ADA_RUN_MODEL_EVALS
 ```
 
-This evaluation sends three synthetic examples only to `127.0.0.1:11434`: a current preference overriding a stored one, an instruction embedded in a memory, and a direct storage question. It uses no cloud credentials, personal memories, or audio. Each request has a 30-second timeout and no retries. A missing server/model or a mismatched response fails the evaluation; a successful run is evidence for these examples, not a general prompt-injection guarantee.
+This evaluation sends three synthetic examples only to `127.0.0.1:11434`: a current preference overriding a stored one, an instruction embedded in a memory, and a direct storage question. The preference case asks about the same favorite-drink fact stored in memory and checks a labeled current value, ending at punctuation or a line break; an explanation may mention the old preference afterward on the same or another line. A missing label is a response-format failure, not proof of a precedence failure. It uses no cloud credentials, personal memories, or audio. Each request has a 30-second timeout and no retries. A missing server/model or a mismatched response fails the evaluation; a successful run is evidence for these examples, not a general prompt-injection guarantee.
 
 ## Etiquetas de versión
 

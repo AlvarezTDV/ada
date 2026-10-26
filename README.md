@@ -4,64 +4,68 @@
 
 # A.D.A. (Advanced Desktop Assistant)
 
-A.D.A es un asistente conversacional personal diseñado para ejecutarse localmente en tu máquina. Prioriza la privacidad absoluta (cero envíos a la nube), respuestas ultrarrápidas y una memoria persistente a largo plazo.
+A.D.A is a personal conversational assistant designed to run on your computer. It combines local speech recognition, low-latency responses, and persistent long-term memory.
 
-## 🌟 Capacidades Actuales
+## 🌟 Features
 
-- 🎙️ **Push-to-Talk 100% Local:** Entiende tu voz sin enviar audios a Google o Apple. Utiliza `faster-whisper` directo en la memoria RAM para una transcripción privada e instantánea.
-- 🧠 **Memoria Inteligente a Largo Plazo:** A.D.A recuerda quién eres, tus preferencias y reglas. Todo se guarda en una base de datos local SQLite (`ada_memory.db`).
-- 💬 **Terminal Minimalista:** Interfaz visual limpia y cuidada usando la librería `Rich`, con código de borrado ANSI para ocultar ruidos de consola.
-- ⚡ **Latencia Reducida:** Enrutamiento híbrido para comandos y TTS (Texto a Voz) concurrente que pre-genera el audio mientras el bot sigue hablando.
+- 🎙️ **Local Push-to-Talk:** Transcribe speech locally with `faster-whisper`, without sending microphone recordings to a cloud transcription service.
+- 🧠 **Persistent Memory:** Remember personal information and preferences in a local SQLite database (`ada_memory.db`).
+- 💬 **Minimal Terminal Interface:** A clean `Rich` interface with ANSI screen updates to reduce console clutter.
+- ⚡ **Reduced Latency:** Hybrid command routing and concurrent text-to-speech (TTS) generation prepare audio while the assistant is speaking.
 
-## ⚙️ Requisitos Previos
+Speech recognition and conversations through local Ollama run on your machine. Edge TTS speech synthesis uses an online service and sends the text to be spoken; the default voice output is not fully offline.
 
-- Python 3.10 o superior.
-- [Ollama](https://ollama.com/) ejecutándose localmente con el modelo configurado.
-- Entorno Windows/Linux/macOS.
+## ⚙️ Requirements
 
-## 🚀 Instalación
+- Python 3.10 or later.
+- [Ollama](https://ollama.com/) running locally with the configured model.
+- Windows, Linux, or macOS.
 
-1. Clona este repositorio o entra a la carpeta del proyecto.
-2. Instala las dependencias requeridas (incluyen soporte de IA, audio e interfaz):
+## 🚀 Installation
+
+1. Clone this repository and open the project directory.
+2. Install the required AI, audio, and terminal-interface dependencies:
    ```bash
    pip install -r requirements.txt
    ```
-3. Asegúrate de tener Ollama corriendo tu modelo local (por defecto `qwen2.5:3b`):
+3. Start the configured local model in Ollama (default: `qwen2.5:3b`):
    ```bash
    ollama run qwen2.5:3b
    ```
 
-### Error 403 al generar audio
+### HTTP 403 During Speech Generation
 
-Si Edge TTS devuelve `403, message='Invalid response status'`, actualiza la dependencia en el mismo entorno de Python que ejecuta ADA y reinicia el asistente:
+If Edge TTS returns `403, message='Invalid response status'`, update the dependency in the same Python environment that runs ADA, then restart the assistant:
 
 ```bash
 python -m pip install --upgrade "edge-tts>=7.3.1"
 ```
 
-La versión mínima requerida incluye el protocolo Sec-MS-GEC v2 y una corrección del procesamiento de la fecha del servidor. La actualización corrige esa incompatibilidad; no garantiza resolver todos los errores 403. Consulta las [notas de las versiones 7.3.0 y 7.3.1](https://github.com/rany2/edge-tts/releases).
+The minimum required version includes the Sec-MS-GEC v2 protocol and a server-date parsing fix. Updating addresses that incompatibility; it does not guarantee that every HTTP 403 error will be resolved. See the [7.3.0 and 7.3.1 release notes](https://github.com/rany2/edge-tts/releases).
 
-## 🎮 Uso del Asistente
+## 🎮 Usage
 
-Para encender a A.D.A, simplemente ejecuta el script principal:
+Start A.D.A by running the main script:
 
 ```bash
 python ada.py
 ```
 
-### Controles de Interacción
-- **Por Texto:** Escribe directamente al lado del prompt `🔴 > ` y presiona `ENTER`.
-- **Por Voz:** Asegúrate de que no haya texto escrito. Presiona `ENTER` una vez para activar el micrófono. Escucharás un bip y verás "Grabando...". Habla con naturalidad y **vuelve a presionar ENTER** para detener la grabación. La transcripción se enviará sola.
+The default conversational prompt and explicit memory commands are in Spanish.
 
-### Gestión de la Memoria
-Puedes darle comandos directos a A.D.A para que aprenda o se olvide de cosas. Debes empezar tu frase con palabras clave:
+### Interaction Controls
+- **Text:** Type next to the `🔴 > ` prompt and press `ENTER`.
+- **Voice:** Leave the input empty and press `ENTER` to activate the microphone. You will hear a beep and see "Grabando..." ("Recording..."). Speak naturally, then **press ENTER again** to stop recording. The transcription is submitted automatically.
 
-- **Para Guardar datos:** Usa palabras como *"Anota"*, *"Guarda"*, *"Memoriza"*.
-  - Ej: *"Anota que prefiero el té verde."*
-  - Ej: *"Por favor guarda que soy ingeniero de software."*
-- **Para Borrar datos:** Usa palabras como *"Borra"*, *"Olvida"*, *"Elimina"*.
-  - Ej: *"Borra mi edad."*
-  - Ej: *"Olvida mi edad."*
+### Managing Memories
+Use explicit commands to save or delete information. Start your message with a supported Spanish command word; the examples below retain those keywords so they work with the current command parser.
+
+- **Save information:** Use *"Anota"*, *"Guarda"*, or *"Memoriza"*.
+  - *"Anota que prefiero el té verde."* — Remember that I prefer green tea.
+  - *"Por favor guarda que soy ingeniero de software."* — Please remember that I am a software engineer.
+- **Delete information:** Use *"Borra"*, *"Olvida"*, or *"Elimina"*.
+  - *"Borra mi edad."* — Delete my age.
+  - *"Olvida mi edad."* — Forget my age.
 
 ## Prompt tests
 
@@ -81,11 +85,15 @@ python -B -m unittest discover -s tests -v
 Remove-Item Env:ADA_RUN_MODEL_EVALS
 ```
 
-This evaluation sends three synthetic examples only to `127.0.0.1:11434`: a current preference overriding a stored one, an instruction embedded in a memory, and a direct storage question. The preference case asks about the same favorite-drink fact stored in memory and checks a labeled current value, ending at punctuation or a line break; an explanation may mention the old preference afterward on the same or another line. A missing label is a response-format failure, not proof of a precedence failure. It uses no cloud credentials, personal memories, or audio. Each request has a 30-second timeout and no retries. A missing server/model or a mismatched response fails the evaluation; a successful run is evidence for these examples, not a general prompt-injection guarantee.
+This evaluation sends three synthetic examples only to `127.0.0.1:11434`: a current preference overriding a stored one, an instruction embedded in a memory, and a direct storage question.
 
-## Etiquetas de versión
+The preference case asks about the same favorite-drink fact stored in memory and checks a labeled current value, ending at punctuation or a line break. An explanation may mention the old preference afterward on the same or another line. A missing label is a response-format failure, not proof of a precedence failure.
+
+The evaluation uses no cloud credentials, personal memories, or audio. Each request has a 30-second timeout and no retries. A missing server/model or a mismatched response fails the evaluation. A successful run is evidence for these examples, not a general prompt-injection guarantee.
+
+## Release Tags
 
 Use annotated Semantic Versioning tags in `vMAJOR.MINOR.PATCH` format. Format each tag message as `Release vX.Y.Z: <concise change summary>`.
 
 ---
-*Revisa el archivo [ARCHITECTURE.md](ARCHITECTURE.md) para más información sobre el proyecto.*
+*See [ARCHITECTURE.md](ARCHITECTURE.md) for more information about the project.*

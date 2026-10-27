@@ -60,6 +60,21 @@ def get_client():
 SAVE_TRIGGERS = r"^(?:por favor\s+|puedes\s+)?(?:anota|guarda|recuerda|memoriza)\b"
 DELETE_TRIGGERS = r"^(?:por favor\s+|puedes\s+)?(?:borra|olvida|elimina)\b"
 
+
+def _parse_memory_array(content: str) -> list:
+    """Accept a JSON array, retaining support for prose or Markdown wrappers."""
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        match = re.search(r"\[.*\]", content, re.DOTALL)
+        if not match:
+            raise ValueError("Expected a JSON array")
+        data = json.loads(match.group(0))
+    if not isinstance(data, list):
+        raise ValueError("Expected a JSON array")
+    return data
+
+
 def execute_memory_command(text: str, client: OpenAI, model: str) -> str | None:
     """
     Detecta si el usuario usó una palabra clave al INICIO de su frase.
@@ -84,14 +99,11 @@ Responde ÚNICAMENTE con el array JSON válido."""
                     temperature=0.0, max_tokens=150
                 )
             content = res.choices[0].message.content.strip()
-            # Buscar el bloque JSON en la respuesta por si generó texto extra
-            match = re.search(r"\[.*\]", content, re.DOTALL)
-            if match:
-                data = json.loads(match.group(0))
-                memory.save_memories(data)
-                for item in data:
-                    console.print(f"  [dim #fd2636]🧠 Anotado: {item.get('key')} -> {item.get('value')}[/dim #fd2636]")
-                return "Información guardada."
+            data = _parse_memory_array(content)
+            saved = memory.save_memories(data)
+            for item in saved:
+                console.print(f"  [dim #fd2636]🧠 Anotado: {item['key']} -> {item['value']}[/dim #fd2636]")
+            return "Información guardada."
         except Exception:
             pass
         return "Hubo un error al intentar extraer y guardar la información."
@@ -116,16 +128,15 @@ Responde ÚNICAMENTE con un array JSON de strings con las claves de la lista que
                     temperature=0.0, max_tokens=50
                 )
             content = res.choices[0].message.content.strip()
-            match = re.search(r"\[.*\]", content, re.DOTALL)
-            if match:
-                keys_to_delete = json.loads(match.group(0))
-                if keys_to_delete:
-                    deleted = memory.delete_memories(keys_to_delete)
-                    for k in deleted:
-                        console.print(f"  [dim #fd2636]🗑️ Olvidado: {k}[/dim #fd2636]")
-                    return "Información eliminada de mi base de datos."
-                else:
-                    return "No encontré ese dato en mi memoria para borrarlo."
+            keys_to_delete = memory.validate_memory_keys(_parse_memory_array(content))
+            if any(key not in keys for key in keys_to_delete):
+                raise ValueError("Deletion keys must belong to the offered memories")
+            deleted = memory.delete_memories(keys_to_delete)
+            if deleted:
+                for k in deleted:
+                    console.print(f"  [dim #fd2636]🗑️ Olvidado: {k}[/dim #fd2636]")
+                return "Información eliminada de mi base de datos."
+            return "No encontré ese dato en mi memoria para borrarlo."
         except Exception:
             pass
         return "Hubo un error al procesar el borrado de memoria."

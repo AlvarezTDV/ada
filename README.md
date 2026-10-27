@@ -86,6 +86,10 @@ Use explicit commands to save or delete information. Start your message with a s
   - *"Borra mi edad."* — Delete my age.
   - *"Olvida mi edad."* — Forget my age.
 
+Memory commands validate the model's JSON before applying changes. Saving requires a non-empty array of objects with non-empty string `key` and `value` fields; `category` defaults to `general` when omitted and otherwise must also be a non-empty string. Surrounding whitespace is trimmed and line breaks are replaced with spaces. Existing keys are updated as before.
+
+Deletion accepts only an array of non-empty string keys selected from those offered to the model. An empty selection means no match. Invalid batches are rejected in full, and database failures roll back the batch. ADA confirms only committed saves or actual deletions, using the existing error/no-match responses without additional startup notices. Validation checks structure and allowed keys, not whether the model understood an ambiguous request correctly.
+
 ## Prompt tests
 
 Run the offline regression tests without starting audio hardware or a language model:
@@ -95,6 +99,8 @@ python -B -m unittest discover -s tests -v
 ```
 
 The tests use temporary SQLite databases, never your `ada_memory.db`. They check that the storage-disclosure rule has a single source in `system_prompt.txt`, memory-as-data/current-turn guidance, prompt composition, and cache/reload behavior. The memory context does not duplicate the disclosure rule. These checks do not prove that a language model follows the instructions.
+
+Memory-operation tests also mock model responses and cover input validation, unchanged database contents after rejected batches, transaction rollback, and confirmations based on actual results. Run them alone with `python -B -m unittest discover -s tests -p "test_memory_validation.py" -v`.
 
 For a bounded behavioral evaluation, start Ollama with the configured default model (`qwen2.5:3b`), then opt in from PowerShell:
 

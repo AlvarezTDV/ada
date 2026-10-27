@@ -1,18 +1,33 @@
 # A.D.A. Architecture (Advanced Desktop Assistant)
 
-A.D.A es un asistente conversacional 100% local, centrado en la privacidad, la baja latencia y la memoria persistente.
+A.D.A es un asistente conversacional de escritorio con transcripción local, chat local o en la nube y memoria persistente en SQLite. Edge TTS es la voz inicial y utiliza un servicio online; el sistema completo no es 100% local ni funciona íntegramente sin conexión.
 
 ## Diseño Core
 
-El sistema opera bajo el principio de **Cero Dependencia de Nube**. El razonamiento y el procesamiento de audio ocurren en el hardware del usuario, protegiendo los datos biométricos (voz) y la información personal (memoria).
+La transcripción del micrófono y el almacenamiento de recuerdos ocurren en el equipo del usuario. El razonamiento depende del proveedor de chat elegido y la síntesis con Edge TTS envía el texto a un servicio externo, incluso cuando el chat usa Ollama local.
 
 | Componente | Módulo | Tecnología / Patrón |
 |---|---|---|
-| **Cerebro (LLM)** | `ada.py` | Ollama (`qwen2.5:3b`) vía OpenAI API local. Enrutamiento híbrido. |
+| **Cerebro (LLM)** | `ada.py` | Ollama local (`qwen2.5:3b`) o chat en la nube (OpenAI por defecto, `gpt-4o-mini`). Enrutamiento híbrido. |
 | **Oídos (STT)** | `voice.py` | `faster-whisper` procesando matrices NumPy en memoria RAM (Zero I/O). |
 | **Voz (TTS)** | `voice.py` | `edge-tts` con pre-fetching en hilos concurrentes + fallback a `pyttsx3`. |
 | **Memoria** | `memory.py` | SQLite3 (`ada_memory.db`) con extracción JSON estructurada. |
 | **Interfaz (UI)** | `ada.py` | `rich` (Terminal minimalista, anclado a la izquierda, fixed-width panel). |
+
+## Flujo de datos y servicios externos
+
+La elección del proveedor de chat y la salida de voz son independientes: `get_client()` selecciona el cliente, mientras `chat_loop()` crea `VoiceEngine(mode="edge")`. Si existe `OPENAI_API_KEY`, se ofrece elegir entre nube y local, con local como opción predeterminada. Esta documentación no añade avisos, indicadores ni confirmaciones a la interfaz.
+
+| Ruta | Datos y destino |
+|---|---|
+| Transcripción (`voice.py`, `listen_manual_push`) | Whisper recibe el audio del micrófono como una matriz NumPy en memoria. No se envía la grabación a un servicio de transcripción. El texto resultante se procesa como una entrada escrita. |
+| Conversación (`ada.py`, `get_system_prompt` y `chat_loop`) | El proveedor seleccionado recibe el mensaje actual, el historial reciente y el prompt del sistema. Este último incorpora los recuerdos cargados mediante `memory.format_memories_for_prompt()`. Con Ollama local, ese procesamiento ocurre en el equipo; con chat cloud, esos datos se envían al proveedor externo. |
+| Guardado (`ada.py`, `execute_memory_command`) | El proveedor seleccionado recibe la orden y su contenido para extraer los datos. SQLite guarda el resultado localmente. La solicitud de extracción no incluye el conjunto de recuerdos existentes. |
+| Borrado (`ada.py`, `execute_memory_command`) | Si hay recuerdos, el proveedor seleccionado recibe la orden y la lista de claves existentes para identificar cuáles borrar. Esta solicitud no incluye sus valores. SQLite ejecuta el borrado localmente; si no hay recuerdos, no se solicita selección al modelo. |
+| Historial de comandos (`ada.py`, `chat_loop`) | La orden de memoria y su confirmación se añaden al historial reciente y pueden enviarse en una conversación cloud posterior. Tras el comando se recarga el contexto de recuerdos. |
+| Síntesis (`voice.py`, `_speak_edge`) | Edge TTS recibe fragmentos del texto de respuesta, después de la limpieza para lectura. Ese texto puede contener datos personales o recuerdos mencionados por ADA. La respuesta hablada se envía aunque el proveedor del chat sea local. |
+
+La ubicación local de `ada_memory.db` no garantiza que los datos guardados permanezcan exclusivamente en el equipo. Eliminar un recuerdo de SQLite tampoco retira copias de información ya enviada a servicios externos. Estas rutas describen el procesamiento de conversaciones, no las descargas de instalación o de modelos.
 
 ## Ciclo de Vida del Comando de Voz (Push-To-Talk)
 

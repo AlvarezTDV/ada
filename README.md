@@ -15,6 +15,25 @@ A.D.A is a personal conversational assistant designed to run on your computer. I
 
 Speech recognition and conversations through local Ollama run on your machine. Edge TTS speech synthesis uses an online service and sends the text to be spoken; the default voice output is not fully offline.
 
+## Privacy and Data Transfers
+
+**Local chat does not make the entire assistant offline.** Edge TTS remains the default voice and sends response text to an online speech service, independently of the chat provider.
+
+| Operation | Where it runs | Data sent to an external service |
+|---|---|---|
+| Microphone transcription | Local Whisper | No microphone recording is sent to a cloud transcription service. The resulting text follows the chat or memory-command route below. |
+| Chat through local Ollama | Your computer | No conversation data is sent to a cloud chat provider. Edge TTS still receives the spoken response text. |
+| Cloud chat | OpenAI by default | Your current message, recent conversation history, and the system prompt, which includes all currently loaded memory entries. |
+| Save a memory in cloud mode | Cloud chat provider for extraction; SQLite locally for storage | Your save command and the information it contains. |
+| Delete a memory in cloud mode | Cloud chat provider for key selection; SQLite locally for deletion | Your delete command and the names of existing memory keys, not their stored values in this parsing request. No parsing request is made when memory is empty. |
+| Voice output through Edge TTS | Online speech service | Response text after speech cleanup, which can contain personal information or recalled memories. |
+
+When `OPENAI_API_KEY` is present, ADA offers a choice between local and cloud chat; local is the default. Memory-command extraction uses that same selected chat provider. Command text and confirmation messages also enter the recent conversation history and can be included in later cloud chat requests.
+
+The SQLite database (`ada_memory.db`) is stored locally, but that does not mean its contents always stay on the device: memory entries are included in cloud chat context, and information repeated in a response can be sent to Edge TTS. Deleting a local memory does not retract information already sent to an external service. This section describes conversation data flows, not installation or model downloads.
+
+See [the architecture's data-flow details](ARCHITECTURE.md#flujo-de-datos-y-servicios-externos) for the implementation paths.
+
 ## ⚙️ Requirements
 
 - Python 3.10 or later.

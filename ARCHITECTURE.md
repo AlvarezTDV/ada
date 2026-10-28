@@ -41,6 +41,14 @@ La carga de Whisper se traslada al primer uso del micrófono. En Windows con Pyt
 
 ---
 
+## Recuperación de la salida de voz
+
+`speak()` devuelve un `SpeechResult` con éxito o fallo, motor, cantidad de fragmentos cuya reproducción terminó y, si corresponde, etapa y error. La generación de Edge usa un `AudioResult`: terminar sin excepción no basta si el archivo falta o está vacío.
+
+La reproducción mantiene la precarga del siguiente fragmento. Si falla la generación, se termina de reproducir el fragmento actual antes de usar `pyttsx3` para el texto pendiente. Si falla la reproducción, el motor local reinicia únicamente el fragmento interrumpido y los siguientes; los fragmentos completados no se repiten. No hay recuperación exacta por palabra.
+
+Antes del respaldo se resuelve la precarga pendiente y se intenta liberar la reproducción y eliminar los archivos temporales. Un error de limpieza se informa sin convertir una reproducción completada en un motivo para repetirla. Las cancelaciones no activan el respaldo. Si ambos motores fallan, se avisa y se conserva la respuesta escrita; el chat puede continuar. No se implementa una máquina de estados ni se alteran los controles de `--speak` o del micrófono.
+
 ## Decisiones de Diseño y Caminos Descartados (ADRs)
 
 Para evitar regresiones, se documentan rigurosamente los enfoques arquitectónicos que se probaron y fueron descartados:

@@ -155,6 +155,7 @@ class OptionalAudioTests(unittest.TestCase):
         communicate.save = AsyncMock()
         pygame.mixer.music.load.side_effect = RuntimeError("playback unavailable")
         with patch.object(self.voice.tempfile, "NamedTemporaryFile") as temporary, \
+             patch.object(self.voice.os.path, "getsize", return_value=1), \
              patch.object(self.voice.os, "remove") as remove:
             temporary.return_value.name = "mock-audio.mp3"
             self.engine.speak("Hola. Otra frase.")

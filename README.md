@@ -83,6 +83,8 @@ Run `python ada.py --help` for the available startup options. Audio dependencies
 - **Microphone:** Leave the input empty and press `ENTER`. On first use, ADA loads Whisper (`base`, CPU/int8); the model may need downloading if it is not cached. When "Grabando..." ("Recording...") appears, speak, then **press ENTER again** to stop recording. The transcription is submitted automatically. Later microphone uses reuse the loaded model.
 - **Spoken responses:** Disabled by default; opt in with `--speak`. Playback initializes on the first response, separately from Whisper. Edge TTS falls back to local synthesis if it fails; if both fail, the written response remains available.
 
+Voice fallback tracks completed fragments: if Edge generation or playback fails, local synthesis continues from the first unfinished fragment instead of repeating the whole response. A fragment interrupted during playback restarts from its beginning, so a few words may repeat; exact word-level recovery is not guaranteed. Empty or missing generated audio also triggers fallback. If both engines fail, ADA reports the problem and keeps text chat available.
+
 If recording fails after it starts, press `ENTER` to finish that recording attempt and return to typing. The first microphone use now bears the Whisper loading cost instead of chat startup.
 
 ### Measured Text Startup
@@ -118,6 +120,8 @@ The tests use temporary SQLite databases, never your `ada_memory.db`. They check
 Memory-operation tests also mock model responses and cover input validation, unchanged database contents after rejected batches, transaction rollback, and confirmations based on actual results. Run them alone with `python -B -m unittest discover -s tests -p "test_memory_validation.py" -v`.
 
 Optional-audio tests block audio imports during text startup and mock microphone, model, playback, and synthesis failures. Run them alone with `python -B -m unittest discover -s tests -p "test_optional_audio.py" -v`. These checks do not validate physical audio hardware or the live speech service.
+
+Voice-fallback regressions cover explicit outcomes, generation without usable audio, playback failures, fragment-level recovery, and temporary-file cleanup: `python -B -m unittest discover -s tests -p "test_voice_fallback.py" -v`.
 
 For a bounded behavioral evaluation, start Ollama with the configured default model (`qwen2.5:3b`), then opt in from PowerShell:
 

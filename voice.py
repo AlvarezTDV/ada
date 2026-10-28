@@ -2,9 +2,26 @@ import os
 import re
 import asyncio
 import tempfile
+from typing import NamedTuple
 from rich.console import Console
 
 console = Console()
+
+
+class SpeechResult(NamedTuple):
+    """Report confirmed playback progress, not merely successful synthesis."""
+    success: bool
+    engine: str
+    completed_chunks: int = 0
+    stage: str | None = None
+    error: Exception | None = None
+
+
+class AudioResult(NamedTuple):
+    success: bool
+    filename: str | None = None
+    error: Exception | None = None
+
 
 class VoiceEngine:
     def __init__(self, mode="edge"):
@@ -40,102 +57,130 @@ class VoiceEngine:
         text = re.sub(r'\s{2,}', ' ', text)
         return text.strip()
 
-    def speak(self, text: str):
+    def speak(self, text: str) -> SpeechResult:
         if not text:
-            return
+            return SpeechResult(True, "none")
 
         text = self.clean_for_tts(text)
+        if not text:
+            return SpeechResult(True, "none")
+
+        chunks = [c.strip() for c in re.split(r'(?<=[.!?:])\s+', text)
+                  if len(c.strip()) >= 2]
+        completed = 0
 
         if self.mode == "edge":
             try:
-                asyncio.run(self._speak_edge(text))
-                return
+                result = asyncio.run(self._speak_edge(chunks))
             except Exception as e:
-                console.print(f"[dim red]Fallback a motor local por error en Edge-TTS: {e}[/dim red]")
+                result = SpeechResult(False, "edge", stage="setup", error=e)
+            if result.success:
+                return result
+            completed = result.completed_chunks
+            console.print(f"[dim red]Fallback a motor local por error en Edge-TTS: {result.error}[/dim red]")
+            # Restart only an interrupted chunk; never replay completed chunks.
+            if completed:
+                text = " ".join(chunks[completed:])
 
         try:
             self._speak_local(text)
+            return SpeechResult(True, "local", len(chunks))
         except Exception as e:
             console.print(f"[red]Salida de voz no disponible; puedes continuar por texto: {e}[/red]")
+            return SpeechResult(False, "local", completed, "playback", e)
 
-    async def _speak_edge(self, text: str):
-        """
-        Chunked TTS with prefetch overlap:
-        - Generates next chunk's audio in a background thread while current chunk plays.
-        - Dramatically reduces the pause between sentences.
-        """
-        import edge_tts
-        import pygame
-
-        if not pygame.mixer.get_init():
-            pygame.mixer.init()
-
-        chunks = re.split(r'(?<=[.!?:])\s+', text)
-        chunks = [c.strip() for c in chunks if len(c.strip()) >= 2]
-
+    async def _speak_edge(self, chunks: list[str]) -> SpeechResult:
+        """Prefetch one chunk while playing, retaining confirmed progress on failure."""
         if not chunks:
-            return
+            return SpeechResult(True, "edge")
+        try:
+            import edge_tts
+            import pygame
 
-        async def generate_audio(chunk: str) -> str:
-            """Generate a temporary MP3, removing incomplete files on failure."""
-            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-            temp_filename = temp_file.name
-            temp_file.close()
-            try:
-                communicate = edge_tts.Communicate(chunk, self.edge_voice)
-                await communicate.save(temp_filename)
-                return temp_filename
-            except BaseException:
+            if not pygame.mixer.get_init():
+                pygame.mixer.init()
+        except Exception as e:
+            return SpeechResult(False, "edge", stage="setup", error=e)
+
+        def remove_audio(filename):
+            if filename:
                 try:
-                    os.remove(temp_filename)
-                except Exception:
+                    os.remove(filename)
+                except FileNotFoundError:
                     pass
+                except OSError as e:
+                    console.print(f"[dim red]No se pudo eliminar audio temporal: {e}[/dim red]")
+
+        async def generate_audio(chunk: str) -> AudioResult:
+            """Normal completion without a nonempty file is still a failure."""
+            filename = None
+            try:
+                temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+                filename = temp_file.name
+                temp_file.close()
+                communicate = edge_tts.Communicate(chunk, self.edge_voice)
+                await communicate.save(filename)
+                if not os.path.getsize(filename):
+                    raise RuntimeError("Edge-TTS no generó audio")
+                return AudioResult(True, filename)
+            except Exception as e:
+                remove_audio(filename)
+                return AudioResult(False, error=e)
+            except BaseException:
+                remove_audio(filename)
                 raise
 
-        def play_and_cleanup(filename: str):
-            """Load, play, wait, unload, delete a temp mp3 file."""
+        def play_and_cleanup(filename: str) -> AudioResult:
             try:
                 pygame.mixer.music.load(filename)
                 pygame.mixer.music.play()
                 while pygame.mixer.music.get_busy():
                     pygame.time.Clock().tick(10)
+                return AudioResult(True)
+            except Exception as e:
+                return AudioResult(False, error=e)
             finally:
-                try:
-                    pygame.mixer.music.unload()
-                finally:
+                # Cleanup errors must not turn finished playback into a replay.
+                for release in (pygame.mixer.music.stop, pygame.mixer.music.unload):
                     try:
-                        os.remove(filename)
-                    except OSError:
-                        pass
+                        release()
+                    except Exception as e:
+                        console.print(f"[dim red]Error al liberar reproducción de audio: {e}[/dim red]")
+                remove_audio(filename)
 
-        # Pre-generate the first chunk before entering the loop
-        current_file = await generate_audio(chunks[0])
+        current = await generate_audio(chunks[0])
+        if not current.success:
+            return SpeechResult(False, "edge", 0, "generation", current.error)
 
-        for i, chunk in enumerate(chunks):
-            # Kick off generation of the NEXT chunk concurrently.
-            # run_in_executor offloads pygame playback to a thread so the event
-            # loop stays alive and can actually drive the prefetch coroutine.
-            next_file_holder = [None]
-
-            async def prefetch_next():
-                if i + 1 < len(chunks):
-                    next_file_holder[0] = await generate_audio(chunks[i + 1])
-
-            prefetch_task = asyncio.create_task(prefetch_next())
-
-            # Settle prefetch on playback failure so no task or audio file is orphaned.
+        for i in range(len(chunks)):
+            prefetch_task = (asyncio.create_task(generate_audio(chunks[i + 1]))
+                             if i + 1 < len(chunks) else None)
+            playback = asyncio.get_running_loop().run_in_executor(
+                None, play_and_cleanup, current.filename
+            )
             try:
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, play_and_cleanup, current_file)
+                # Do not abandon a playback thread if the coroutine is cancelled.
+                played = await asyncio.shield(playback)
             except BaseException:
-                await asyncio.gather(prefetch_task, return_exceptions=True)
-                if next_file_holder[0]:
-                    os.remove(next_file_holder[0])
+                await asyncio.gather(playback, return_exceptions=True)
+                if prefetch_task:
+                    pending = (await asyncio.gather(prefetch_task, return_exceptions=True))[0]
+                    if isinstance(pending, AudioResult):
+                        remove_audio(pending.filename)
                 raise
 
-            # By the time playback ends, prefetch is already done or nearly so
-            await prefetch_task
-            current_file = next_file_holder[0]
+            if not played.success:
+                if prefetch_task:
+                    pending = await prefetch_task
+                    remove_audio(pending.filename)
+                return SpeechResult(False, "edge", i, "playback", played.error)
+
+            if prefetch_task:
+                current = await prefetch_task
+                if not current.success:
+                    return SpeechResult(False, "edge", i + 1, "generation", current.error)
+
+        return SpeechResult(True, "edge", len(chunks))
 
     def _speak_local(self, text: str):
         import pyttsx3

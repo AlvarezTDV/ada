@@ -13,20 +13,20 @@ A.D.A is a personal conversational assistant designed to run on your computer. I
 - 💬 **Minimal Terminal Interface:** A clean `Rich` interface with ANSI screen updates to reduce console clutter.
 - ⚡ **Reduced Latency:** Hybrid command routing and concurrent text-to-speech (TTS) generation prepare audio while the assistant is speaking.
 
-Speech recognition and conversations through local Ollama run on your machine. Edge TTS speech synthesis uses an online service and sends the text to be spoken; the default voice output is not fully offline.
+ADA starts in text mode without loading audio dependencies or opening audio devices. Speech recognition and conversations through local Ollama run on your machine. Optional Edge TTS speech synthesis uses an online service and sends the text to be spoken.
 
 ## Privacy and Data Transfers
 
-**Local chat does not make the entire assistant offline.** Edge TTS remains the default voice and sends response text to an online speech service, independently of the chat provider.
+**Local chat does not make enabled speech output offline.** Speech output is off by default. With `--speak`, Edge TTS is the default synthesis engine and sends response text to an online speech service, independently of the chat provider.
 
 | Operation | Where it runs | Data sent to an external service |
 |---|---|---|
 | Microphone transcription | Local Whisper | No microphone recording is sent to a cloud transcription service. The resulting text follows the chat or memory-command route below. |
-| Chat through local Ollama | Your computer | No conversation data is sent to a cloud chat provider. Edge TTS still receives the spoken response text. |
+| Chat through local Ollama | Your computer | No conversation data is sent to a cloud chat provider. With `--speak`, Edge TTS receives the spoken response text. |
 | Cloud chat | OpenAI by default | Your current message, recent conversation history, and the system prompt, which includes all currently loaded memory entries. |
 | Save a memory in cloud mode | Cloud chat provider for extraction; SQLite locally for storage | Your save command and the information it contains. |
 | Delete a memory in cloud mode | Cloud chat provider for key selection; SQLite locally for deletion | Your delete command and the names of existing memory keys, not their stored values in this parsing request. No parsing request is made when memory is empty. |
-| Voice output through Edge TTS | Online speech service | Response text after speech cleanup, which can contain personal information or recalled memories. |
+| Optional voice output through Edge TTS (`--speak`) | Online speech service | Response text after speech cleanup, which can contain personal information or recalled memories. |
 
 When `OPENAI_API_KEY` is present, ADA offers a choice between local and cloud chat; local is the default. Memory-command extraction uses that same selected chat provider. Command text and confirmation messages also enter the recent conversation history and can be included in later cloud chat requests.
 
@@ -70,11 +70,26 @@ Start A.D.A by running the main script:
 python ada.py
 ```
 
-The default conversational prompt and explicit memory commands are in Spanish.
+The default conversational prompt and explicit memory commands are in Spanish. To enable spoken responses independently of microphone input:
+
+```bash
+python ada.py --speak
+```
+
+Run `python ada.py --help` for the available startup options. Audio dependencies in `requirements.txt` are needed only when using their respective audio features; missing or failing audio components report an error without preventing text chat.
 
 ### Interaction Controls
 - **Text:** Type next to the `🔴 > ` prompt and press `ENTER`.
-- **Voice:** Leave the input empty and press `ENTER` to activate the microphone. You will hear a beep and see "Grabando..." ("Recording..."). Speak naturally, then **press ENTER again** to stop recording. The transcription is submitted automatically.
+- **Microphone:** Leave the input empty and press `ENTER`. On first use, ADA loads Whisper (`base`, CPU/int8); the model may need downloading if it is not cached. When "Grabando..." ("Recording...") appears, speak, then **press ENTER again** to stop recording. The transcription is submitted automatically. Later microphone uses reuse the loaded model.
+- **Spoken responses:** Disabled by default; opt in with `--speak`. Playback initializes on the first response, separately from Whisper. Edge TTS falls back to local synthesis if it fails; if both fail, the written response remains available.
+
+If recording fails after it starts, press `ENTER` to finish that recording attempt and return to typing. The first microphone use now bears the Whisper loading cost instead of chat startup.
+
+### Measured Text Startup
+
+On Windows with Python 3.13.7, the median time from launching a fresh process to the first text prompt fell from **3.86 s to 1.94 s**, a **1.92 s (49.8%) reduction** compared with commit `353fa4b`, before optional audio.
+
+The comparison used one discarded warmup and five measured runs per version, alternating their order. Dependencies and the Whisper model were already cached; model downloads were disabled. Both versions used isolated SQLite databases and local-chat configuration, with real imports and initialization, stopping at the first prompt before submitting a message. This is a cached-startup measurement on one machine, not a cold-cache, first-microphone, or response-latency benchmark, and it does not guarantee the same improvement elsewhere.
 
 ### Managing Memories
 Use explicit commands to save or delete information. Start your message with a supported Spanish command word; the examples below retain those keywords so they work with the current command parser.
@@ -102,6 +117,8 @@ The tests use temporary SQLite databases, never your `ada_memory.db`. They check
 
 Memory-operation tests also mock model responses and cover input validation, unchanged database contents after rejected batches, transaction rollback, and confirmations based on actual results. Run them alone with `python -B -m unittest discover -s tests -p "test_memory_validation.py" -v`.
 
+Optional-audio tests block audio imports during text startup and mock microphone, model, playback, and synthesis failures. Run them alone with `python -B -m unittest discover -s tests -p "test_optional_audio.py" -v`. These checks do not validate physical audio hardware or the live speech service.
+
 For a bounded behavioral evaluation, start Ollama with the configured default model (`qwen2.5:3b`), then opt in from PowerShell:
 
 ```powershell
@@ -115,6 +132,8 @@ This evaluation sends three synthetic examples only to `127.0.0.1:11434`: a curr
 The preference case asks about the same favorite-drink fact stored in memory and checks a labeled current value, ending at punctuation or a line break. An explanation may mention the old preference afterward on the same or another line. A missing label is a response-format failure, not proof of a precedence failure.
 
 The evaluation uses no cloud credentials, personal memories, or audio. Each request has a 30-second timeout and no retries. A missing server/model or a mismatched response fails the evaluation. A successful run is evidence for these examples, not a general prompt-injection guarantee.
+
+All three live cases passed locally with `qwen2.5:3b` (3.1B, `Q4_K_M`), using synthetic memories and isolated databases. The test run took 6.74 seconds; this is validation of those three examples, not a general model-quality or latency benchmark.
 
 ## Release Tags
 

@@ -3,6 +3,7 @@ import re
 import sys
 import json
 import unicodedata
+import argparse
 
 # Suprimir el banner de pygame antes de importarlo
 os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "hide"
@@ -193,7 +194,7 @@ def print_ada_response(text: str, mode: str):
 
 # ─── Bucle Principal ──────────────────────────────────────────────────────────
 
-def chat_loop():
+def chat_loop(speech_enabled=False):
     memory.init_db()
     print_header()
 
@@ -213,12 +214,10 @@ def chat_loop():
             else:
                 user_input = voice_engine.listen_manual_push()
                 
-                # Magia ANSI: Borramos visualmente los 2 saltos de línea (ENTER para iniciar y ENTER para detener)
-                # Subimos una línea y limpiamos (\033[1A\033[2K), y lo hacemos 2 veces.
-                sys.stdout.write("\033[1A\033[2K\033[1A\033[2K\r")
-                sys.stdout.flush()
-                
                 if user_input:
+                    # Keep audio failure notices visible when transcription is empty.
+                    sys.stdout.write("\033[1A\033[2K\033[1A\033[2K\r")
+                    sys.stdout.flush()
                     # Reescribimos el prompt original pero esta vez con la voz transcrita en la misma línea
                     console.print(f"[bold #fd2636]🔴[/bold #fd2636] > [dim]{user_input}[/dim]")
 
@@ -228,7 +227,8 @@ def chat_loop():
             if user_input.strip().lower() in {"salir", "exit", "quit"}:
                 farewell = "Hasta luego."
                 print_ada_response(farewell, "casual")
-                voice_engine.speak(farewell)
+                if speech_enabled:
+                    voice_engine.speak(farewell)
                 break
 
             # ── 1. Intercepción de Comandos Explícitos ──
@@ -236,7 +236,8 @@ def chat_loop():
             if cmd_response:
                 # Si el usuario dio un comando, ejecutamos DB, damos la respuesta rápida y cortamos aquí.
                 print_ada_response(cmd_response, "task")
-                voice_engine.speak(cmd_response)
+                if speech_enabled:
+                    voice_engine.speak(cmd_response)
                 
                 # Actualizamos historial y recargamos system prompt para turnos futuros
                 messages.append({"role": "user", "content": user_input})
@@ -276,7 +277,8 @@ def chat_loop():
 
             print_ada_response(ada_response, mode)
             messages.append({"role": "assistant", "content": ada_response})
-            voice_engine.speak(ada_response)
+            if speech_enabled:
+                voice_engine.speak(ada_response)
 
         except KeyboardInterrupt:
             console.print("\n[dim #fd2636]Nos vemos.[/dim #fd2636]")
@@ -285,4 +287,8 @@ def chat_loop():
             console.print(f"\n[red]❌ {e}[/red]\n")
 
 if __name__ == "__main__":
-    chat_loop()
+    parser = argparse.ArgumentParser(description="ADA: chat por texto con audio opcional.")
+    parser.add_argument("--speak", action="store_true",
+                        help="Activar respuestas habladas (Edge TTS online con respaldo local).")
+    args = parser.parse_args()
+    chat_loop(speech_enabled=args.speak)

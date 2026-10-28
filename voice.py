@@ -1,16 +1,7 @@
-import time
-import io
-import wave
 import os
 import re
-import sys
 import asyncio
-import threading
-import edge_tts
 import tempfile
-import pyttsx3
-import pygame
-from faster_whisper import WhisperModel
 from rich.console import Console
 
 console = Console()
@@ -20,13 +11,15 @@ class VoiceEngine:
         self.mode = mode
         self.edge_voice = "es-MX-DaliaNeural"
         
-        # Cargar el modelo local de Whisper (quantizado a int8 para CPU) para máxima velocidad y privacidad
-        self.whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
-        
-        try:
-            pygame.mixer.init()
-        except Exception:
-            pass
+        self.whisper_model = None
+
+    def _get_whisper_model(self):
+        if self.whisper_model is None:
+            from faster_whisper import WhisperModel
+
+            console.print("[dim]Cargando reconocimiento de voz por primera vez...[/dim]")
+            self.whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
+        return self.whisper_model
 
     @staticmethod
     def clean_for_tts(text: str) -> str:
@@ -60,7 +53,10 @@ class VoiceEngine:
             except Exception as e:
                 console.print(f"[dim red]Fallback a motor local por error en Edge-TTS: {e}[/dim red]")
 
-        self._speak_local(text)
+        try:
+            self._speak_local(text)
+        except Exception as e:
+            console.print(f"[red]Salida de voz no disponible; puedes continuar por texto: {e}[/red]")
 
     async def _speak_edge(self, text: str):
         """
@@ -68,14 +64,20 @@ class VoiceEngine:
         - Generates next chunk's audio in a background thread while current chunk plays.
         - Dramatically reduces the pause between sentences.
         """
+        import edge_tts
+        import pygame
+
+        if not pygame.mixer.get_init():
+            pygame.mixer.init()
+
         chunks = re.split(r'(?<=[.!?:])\s+', text)
         chunks = [c.strip() for c in chunks if len(c.strip()) >= 2]
 
         if not chunks:
             return
 
-        async def generate_audio(chunk: str) -> str | None:
-            """Generate a temp mp3 for a chunk and return its path, or None on failure."""
+        async def generate_audio(chunk: str) -> str:
+            """Generate a temporary MP3, removing incomplete files on failure."""
             temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
             temp_filename = temp_file.name
             temp_file.close()
@@ -83,13 +85,12 @@ class VoiceEngine:
                 communicate = edge_tts.Communicate(chunk, self.edge_voice)
                 await communicate.save(temp_filename)
                 return temp_filename
-            except Exception as e:
-                console.print(f"[dim red]Error generando audio: {e}[/dim red]")
+            except BaseException:
                 try:
                     os.remove(temp_filename)
                 except Exception:
                     pass
-                return None
+                raise
 
         def play_and_cleanup(filename: str):
             """Load, play, wait, unload, delete a temp mp3 file."""
@@ -98,14 +99,14 @@ class VoiceEngine:
                 pygame.mixer.music.play()
                 while pygame.mixer.music.get_busy():
                     pygame.time.Clock().tick(10)
-                pygame.mixer.music.unload()
-            except Exception as e:
-                console.print(f"[dim red]Error reproduciendo chunk: {e}[/dim red]")
             finally:
                 try:
-                    os.remove(filename)
-                except Exception:
-                    pass
+                    pygame.mixer.music.unload()
+                finally:
+                    try:
+                        os.remove(filename)
+                    except OSError:
+                        pass
 
         # Pre-generate the first chunk before entering the loop
         current_file = await generate_audio(chunks[0])
@@ -122,18 +123,25 @@ class VoiceEngine:
 
             prefetch_task = asyncio.create_task(prefetch_next())
 
-            # Play in a thread — event loop stays free for prefetch_task
-            if current_file:
+            # Settle prefetch on playback failure so no task or audio file is orphaned.
+            try:
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(None, play_and_cleanup, current_file)
+            except BaseException:
+                await asyncio.gather(prefetch_task, return_exceptions=True)
+                if next_file_holder[0]:
+                    os.remove(next_file_holder[0])
+                raise
 
             # By the time playback ends, prefetch is already done or nearly so
             await prefetch_task
             current_file = next_file_holder[0]
 
     def _speak_local(self, text: str):
+        import pyttsx3
+
+        engine = pyttsx3.init()
         try:
-            engine = pyttsx3.init()
             voices = engine.getProperty('voices')
             for voice in voices:
                 if "female" in voice.name.lower() or "helena" in voice.name.lower() or "sabina" in voice.name.lower():
@@ -142,67 +150,60 @@ class VoiceEngine:
             engine.setProperty('rate', 165)
             engine.say(text)
             engine.runAndWait()
+        finally:
             engine.stop()
-        except Exception:
-            pass
 
     def listen_manual_push(self) -> str:
-        """
-        Push-To-Talk con gestión garantizada y eventos de consola puros (Sin msvcrt).
-        """
-        import pyaudio
-        
-        CHUNK = 1024
-        FORMAT = pyaudio.paInt16
-        CHANNELS = 1
-        RATE = 16000
-        
-        p = pyaudio.PyAudio()
+        """Record until Enter, without leaving a background console reader."""
+        p = None
         stream = None
         frames = []
-        
-        stop_event = threading.Event()
-        
-        def wait_for_enter():
-            input()
-            stop_event.set()
-            
-        # Hilo en segundo plano que espera el próximo ENTER de forma nativa multiplataforma
-        threading.Thread(target=wait_for_enter, daemon=True).start()
-        
+        capture_error = None
         try:
-            stream = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, frames_per_buffer=CHUNK)
-            while not stop_event.is_set():
-                data = stream.read(CHUNK, exception_on_overflow=False)
+            import pyaudio
+            import numpy as np
+
+            model = self._get_whisper_model()
+            p = pyaudio.PyAudio()
+
+            def record_chunk(data, frame_count, time_info, status):
+                nonlocal capture_error
+                if status:
+                    capture_error = RuntimeError(f"Fallo de captura de audio ({status})")
+                    return None, pyaudio.paAbort
                 frames.append(data)
-                
+                return None, pyaudio.paContinue
+
+            stream = p.open(format=pyaudio.paInt16, channels=1, rate=16000,
+                            input=True, frames_per_buffer=1024, stream_callback=record_chunk)
+            input("Grabando... Presiona ENTER para detener y volver al chat.\n")
+            if capture_error:
+                raise capture_error
         except Exception as e:
-            console.print(f"[red]Error abriendo/leyendo micrófono: {e}[/red]")
+            console.print(f"[red]Entrada de voz no disponible; puedes continuar por texto: {e}[/red]")
             return ""
         finally:
-            # Garantizamos la liberación segura del hardware de audio sin importar excepciones
             if stream is not None:
+                for close in (stream.stop_stream, stream.close):
+                    try:
+                        close()
+                    except Exception as e:
+                        console.print(f"[red]Error al cerrar micrófono; continúa por texto: {e}[/red]")
+            if p is not None:
                 try:
-                    stream.stop_stream()
-                    stream.close()
-                except Exception:
-                    pass
-            p.terminate()
+                    p.terminate()
+                except Exception as e:
+                    console.print(f"[red]Error al liberar audio; continúa por texto: {e}[/red]")
 
-        import numpy as np
-        audio_data = b''.join(frames)
-        
-        # Convertir el audio crudo PCM de 16-bit a matriz Numpy Float32 (Requisito nativo de Whisper)
-        # ¡Esto evita escribir archivos en el disco duro y soluciona bloqueos en Windows!
-        audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
-        
+        if not frames:
+            return ""
         try:
-            # Transcripción offline 100% privada usando faster-whisper directamente desde la memoria RAM
-            segments, info = self.whisper_model.transcribe(audio_np, language="es")
+            audio_np = np.frombuffer(b''.join(frames), dtype=np.int16).astype(np.float32) / 32768.0
+            segments, info = model.transcribe(audio_np, language="es")
             text = " ".join([segment.text for segment in segments]).strip()
             return text
         except Exception as e:
-            console.print(f"[red]Error procesando transcripción: {e}[/red]")
+            console.print(f"[red]Error procesando transcripción; continúa por texto: {e}[/red]")
             return ""
 
 if __name__ == "__main__":

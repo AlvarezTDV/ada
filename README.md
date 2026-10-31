@@ -23,14 +23,14 @@ ADA starts in text mode without loading audio dependencies or opening audio devi
 |---|---|---|
 | Microphone transcription | Local Whisper | No microphone recording is sent to a cloud transcription service. The resulting text follows the chat or memory-command route below. |
 | Chat through local Ollama | Your computer | No conversation data is sent to a cloud chat provider. With `--speak`, Edge TTS receives the spoken response text. |
-| Cloud chat | OpenAI by default | Your current message, recent conversation history, and the system prompt, which includes all currently loaded memory entries. |
+| Cloud chat | OpenAI by default | Your current message, recent conversation history, and the system prompt, which includes only the memory entries selected for this turn. |
 | Save a memory in cloud mode | Cloud chat provider for extraction; SQLite locally for storage | Your save command and the information it contains. |
 | Delete a memory in cloud mode | Cloud chat provider for key selection; SQLite locally for deletion | Your delete command and the names of existing memory keys, not their stored values in this parsing request. No parsing request is made when memory is empty. |
 | Optional voice output through Edge TTS (`--speak`) | Online speech service | Response text after speech cleanup, which can contain personal information or recalled memories. |
 
 When `OPENAI_API_KEY` is present, ADA offers a choice between local and cloud chat; local is the default. Memory-command extraction uses that same selected chat provider. Command text and confirmation messages also enter the recent conversation history and can be included in later cloud chat requests.
 
-The SQLite database (`ada_memory.db`) is stored locally, but that does not mean its contents always stay on the device: memory entries are included in cloud chat context, and information repeated in a response can be sent to Edge TTS. Deleting a local memory does not retract information already sent to an external service. This section describes conversation data flows, not installation or model downloads.
+The SQLite database (`ada_memory.db`) is stored locally, but that does not mean its contents always stay on the device: selected memory entries are included in cloud chat context, and information repeated in a response can be sent to Edge TTS. Selection does not remove facts already mentioned in conversation history or provide per-record cloud permissions. Deleting a local memory does not retract information already sent to an external service. This section describes conversation data flows, not installation or model downloads.
 
 See [the architecture's data-flow details](ARCHITECTURE.md#flujo-de-datos-y-servicios-externos) for the implementation paths.
 
@@ -107,6 +107,19 @@ Memory commands validate the model's JSON before applying changes. Saving requir
 
 Deletion accepts only an array of non-empty string keys selected from those offered to the model. An empty selection means no match. Invalid batches are rejected in full, and database failures roll back the batch. ADA confirms only committed saves or actual deletions, using the existing error/no-match responses without additional startup notices. Validation checks structure and allowed keys, not whether the model understood an ambiguous request correctly.
 
+### Bounded Local Memory Retrieval
+
+Each conversational turn selects memories locally before calling the chosen chat model:
+
+- Rank by the number of distinct query words matching the category, key, or value. Matching ignores case and accents, splits underscore-separated keys, and ignores common Spanish/English function words. It does not infer synonyms or use embeddings.
+- Break equal-score ties by latest update, then newest record ID. Repeated words do not increase the score.
+- Include at most **five complete memories** within **1,200 Unicode characters for the entire memory block**, including its heading, guidance, labels, and footer. Skip oversized records and try the next match; never truncate or delete stored data.
+- If nothing matches or fits, state that no relevant memories are available for this turn, not that the database is empty. Only base instructions are cached; selection is rebuilt from the current message.
+
+For example, a query mentioning `bebida favorita` can retrieve a `bebida_favorita` key while omitting an unrelated programming-language record. A synonym with no shared word may miss the record; this is deliberately lexical, not semantic retrieval.
+
+The character ceiling approximates a small context budget; **it does not guarantee 300 tokens**. It uses no model-specific tokenizer or additional dependency. It limits new memory injection, not the database size, conversation history, full request, or generated response. Save/delete parsing remains unchanged, including the existing key-list transfer in cloud deletion requests.
+
 ## Prompt tests
 
 Run the offline regression tests without starting audio hardware or a language model:
@@ -115,7 +128,9 @@ Run the offline regression tests without starting audio hardware or a language m
 python -B -m unittest discover -s tests -v
 ```
 
-The tests use temporary SQLite databases, never your `ada_memory.db`. They check that the storage-disclosure rule has a single source in `system_prompt.txt`, memory-as-data/current-turn guidance, prompt composition, and cache/reload behavior. The memory context does not duplicate the disclosure rule. These checks do not prove that a language model follows the instructions.
+The tests use temporary SQLite databases, never your `ada_memory.db`. They check that the storage-disclosure rule has a single source in `system_prompt.txt`, memory-as-data/current-turn guidance, prompt composition, and base-instruction cache/reload behavior. The memory context does not duplicate the disclosure rule. These checks do not prove that a language model follows the instructions.
+
+Retrieval regressions check matching, ranking, count and character ceilings, intact stored values, topic changes, and the actual chat/retry request path with any model name. Run them alone with `python -B -m unittest discover -s tests -p "test_memory_retrieval.py" -v`.
 
 Memory-operation tests also mock model responses and cover input validation, unchanged database contents after rejected batches, transaction rollback, and confirmations based on actual results. Run them alone with `python -B -m unittest discover -s tests -p "test_memory_validation.py" -v`.
 
@@ -131,13 +146,15 @@ python -B -m unittest discover -s tests -v
 Remove-Item Env:ADA_RUN_MODEL_EVALS
 ```
 
-This evaluation sends three synthetic examples only to `127.0.0.1:11434`: a current preference overriding a stored one, an instruction embedded in a memory, and a direct storage question.
+This evaluation sends synthetic examples only to `127.0.0.1:11434`: a current preference overriding a stored one, an instruction embedded in a matching memory, a direct storage question, and retrieval cases for topic changes, the five-record ceiling, and an omitted oversized record. The storage fixture uses a matching Spanish category. Six test cases make seven requests.
 
 The preference case asks about the same favorite-drink fact stored in memory and checks a labeled current value, ending at punctuation or a line break. An explanation may mention the old preference afterward on the same or another line. A missing label is a response-format failure, not proof of a precedence failure.
 
 The evaluation uses no cloud credentials, personal memories, or audio. Each request has a 30-second timeout and no retries. A missing server/model or a mismatched response fails the evaluation. A successful run is evidence for these examples, not a general prompt-injection guarantee.
 
 All three live cases passed locally with `qwen2.5:3b` (3.1B, `Q4_K_M`), using synthetic memories and isolated databases. The test run took 6.74 seconds; this is validation of those three examples, not a general model-quality or latency benchmark.
+
+After bounded retrieval was added, all six live cases passed with local `qwen2.5:3b`; the 67-test suite took 18.997 seconds. Seven synthetic requests covered the original prompt policies and new retrieval scenarios. Independent offline probes additionally checked exact 1,200/1,201-character boundaries, immediate updates/deletions, all chat modes, and unchanged database bytes after rejected commands. These results do not establish quality for every user-selected model.
 
 ## Release Tags
 

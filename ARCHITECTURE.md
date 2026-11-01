@@ -21,13 +21,19 @@ La elección del proveedor de chat y la salida de voz son independientes: `get_c
 | Ruta | Datos y destino |
 |---|---|
 | Transcripción (`voice.py`, `listen_manual_push`) | Whisper recibe el audio del micrófono como una matriz NumPy en memoria. No se envía la grabación a un servicio de transcripción. El texto resultante se procesa como una entrada escrita. |
-| Conversación (`ada.py`, `get_system_prompt` y `chat_loop`) | El proveedor seleccionado recibe el mensaje actual, el historial reciente y el prompt del sistema. Este último incorpora los recuerdos cargados mediante `memory.format_memories_for_prompt()`. Con Ollama local, ese procesamiento ocurre en el equipo; con chat cloud, esos datos se envían al proveedor externo. |
+| Conversación (`ada.py`, `get_system_prompt` y `chat_loop`) | El proveedor seleccionado recibe el mensaje actual, el historial reciente y el prompt del sistema. Este último incorpora solo los recuerdos seleccionados para el turno mediante `memory.select_memories_for_prompt()`. La selección es local tanto con Ollama como con chat cloud; en cloud, los registros seleccionados se envían al proveedor externo. |
 | Guardado (`ada.py`, `execute_memory_command`) | El proveedor seleccionado recibe la orden y su contenido para extraer los datos. SQLite guarda el resultado localmente. La solicitud de extracción no incluye el conjunto de recuerdos existentes. |
 | Borrado (`ada.py`, `execute_memory_command`) | Si hay recuerdos, el proveedor seleccionado recibe la orden y la lista de claves existentes para identificar cuáles borrar. Esta solicitud no incluye sus valores. SQLite ejecuta el borrado localmente; si no hay recuerdos, no se solicita selección al modelo. |
-| Historial de comandos (`ada.py`, `chat_loop`) | La orden de memoria y su confirmación se añaden al historial reciente y pueden enviarse en una conversación cloud posterior. Tras el comando se recarga el contexto de recuerdos. |
+| Historial de comandos (`ada.py`, `chat_loop`) | La orden de memoria y su confirmación se añaden al historial reciente y pueden enviarse en una conversación cloud posterior. Tras el comando se recargan las instrucciones base; la selección de recuerdos se calcula con el siguiente mensaje conversacional. |
 | Síntesis opcional (`voice.py`, `_speak_edge`) | Con `--speak`, Edge TTS recibe fragmentos del texto de respuesta, después de la limpieza para lectura. Ese texto puede contener datos personales o recuerdos mencionados por ADA, aunque el proveedor del chat sea local. Sin esa opción no se solicita síntesis. |
 
 La ubicación local de `ada_memory.db` no garantiza que los datos guardados permanezcan exclusivamente en el equipo. Eliminar un recuerdo de SQLite tampoco retira copias de información ya enviada a servicios externos. Estas rutas describen el procesamiento de conversaciones, no las descargas de instalación o de modelos.
+
+### Selección acotada de recuerdos
+
+Solo se mantienen en caché las instrucciones base. En cada turno se comparan palabras del mensaje actual con categoría, clave y valor, normalizando mayúsculas y tildes, separando guiones bajos y descartando palabras funcionales comunes. Se ordena por cantidad de coincidencias distintas; los empates usan `updated_at` e `id` descendentes.
+
+El bloque completo incluye hasta cinco registros y 1.200 caracteres Unicode, contando encabezado y formato. Los registros que no caben se omiten completos y se prueban los siguientes; no se modifica SQLite. Sin coincidencias o espacio, se indica ausencia de recuerdos pertinentes para ese turno. El límite es aproximado respecto a tokens, sin tokenizadores ni dependencias nuevas; no garantiza 300 tokens ni limita toda la solicitud. No hay búsqueda semántica, catálogo de sinónimos ni controles nuevos de exclusión cloud. El historial puede conservar datos mencionados antes.
 
 ## Ciclo de Vida del Comando de Voz (Push-To-Talk)
 

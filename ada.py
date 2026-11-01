@@ -32,8 +32,8 @@ MODE_EMOJI = {
 
 _CACHED_SYSTEM_PROMPT = None
 
-def get_system_prompt(reload: bool = False) -> str:
-    """Carga el system prompt e inyecta la BD de memoria viva."""
+def get_system_prompt(reload: bool = False, *, query: str = "") -> str:
+    """Cache base instructions only; select bounded memory for the current turn."""
     global _CACHED_SYSTEM_PROMPT
     if _CACHED_SYSTEM_PROMPT is None or reload:
         try:
@@ -42,10 +42,9 @@ def get_system_prompt(reload: bool = False) -> str:
         except FileNotFoundError:
             base_prompt = "Eres A.D.A., una asistente de IA personal."
 
-        mem_context = memory.format_memories_for_prompt()
-        _CACHED_SYSTEM_PROMPT = f"{base_prompt}\n\n{mem_context}"
+        _CACHED_SYSTEM_PROMPT = base_prompt
 
-    return _CACHED_SYSTEM_PROMPT
+    return f"{_CACHED_SYSTEM_PROMPT}\n\n{memory.select_memories_for_prompt(query)}"
 
 def get_client():
     api_key = os.getenv("OPENAI_API_KEY")
@@ -248,7 +247,7 @@ def chat_loop(speech_enabled=False):
                 continue  # NO invocamos al LLM para charlar. Salto directo al próximo turno.
 
             # ── 2. Conversación Normal ──
-            messages[0] = {"role": "system", "content": get_system_prompt()}
+            messages[0] = {"role": "system", "content": get_system_prompt(query=user_input)}
             messages.append({"role": "user", "content": user_input})
             if len(messages) > 11:
                 messages = [messages[0]] + messages[-10:]

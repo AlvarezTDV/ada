@@ -30,20 +30,22 @@ class WorkerConfigurationTests(unittest.IsolatedAsyncioTestCase):
     async def test_page_observations_are_structured_and_reject_foreign_origins(self):
         tools = worker.read_tools("example.com")
         action = tools.registry.registry.actions["read_page"].function
-        for url in ("https://example.com/page", "https://other.example/page", "http://127.0.0.1",
-                    "https://@example.com/", "https://:@example.com/"):
-            snapshot = {"url": url, "title": "Observed title", "language": "en", "text": "Observed text"}
-            page = Mock(evaluate=AsyncMock(return_value=json.dumps(snapshot)), goto=AsyncMock())
-            session = Mock(get_current_page=AsyncMock(return_value=page))
-            with self.subTest(url=url):
-                if url.startswith("https://example.com/"):
-                    result = await action(browser_session=session)
-                    self.assertEqual(json.loads(result.extracted_content.split("\n", 1)[1]), snapshot)
-                    page.goto.assert_not_called()
-                else:
-                    with self.assertRaises(worker.BrowserError):
-                        await action(browser_session=session)
-                    page.goto.assert_awaited_once_with("about:blank")
+        for native in (False, True):
+            for url in ("https://example.com/page", "https://other.example/page", "http://127.0.0.1",
+                        "https://@example.com/", "https://:@example.com/"):
+                snapshot = {"url": url, "title": "Observed title", "language": "en", "text": "Observed text"}
+                raw = snapshot if native else json.dumps(snapshot)
+                page = Mock(evaluate=AsyncMock(return_value=raw), goto=AsyncMock())
+                session = Mock(get_current_page=AsyncMock(return_value=page))
+                with self.subTest(url=url, native=native):
+                    if url.startswith("https://example.com/"):
+                        result = await action(browser_session=session)
+                        self.assertEqual(json.loads(result.extracted_content.split("\n", 1)[1]), snapshot)
+                        page.goto.assert_not_called()
+                    else:
+                        with self.assertRaises(worker.BrowserError):
+                            await action(browser_session=session)
+                        page.goto.assert_awaited_once_with("about:blank")
 
     async def test_local_browser_and_model_are_explicit_without_cloud_fallback(self):
         browser = Mock(kill=AsyncMock())

@@ -56,7 +56,7 @@ def read_tools(host):
             language: document.documentElement.lang,
             text: (document.body?.innerText || '').slice(0, 20000)})""")
         try:
-            snapshot = json.loads(raw)
+            snapshot = json.loads(raw) if isinstance(raw, str) else raw
             if not isinstance(snapshot, dict) or any(not isinstance(snapshot.get(key), str)
                                                      for key in ("url", "title", "language", "text")):
                 raise ValueError

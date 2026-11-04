@@ -1,4 +1,3 @@
-import asyncio
 import importlib.util
 import json
 import os
@@ -11,24 +10,24 @@ import browser_worker as worker
 
 
 @unittest.skipUnless(importlib.util.find_spec("browser_use"), "optional isolated Browser Use environment")
-class WorkerConfigurationTests(unittest.TestCase):
+class WorkerConfigurationTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         env = patch.dict(os.environ, {"ANONYMIZED_TELEMETRY": "false", "BROWSER_USE_CLOUD_SYNC": "false",
                                       "PYTHON_DOTENV_DISABLED": "1", "ADA_BROWSER_MODEL": "qwen2.5:3b"})
         env.start()
         self.addCleanup(env.stop)
 
-    def test_only_vetted_read_actions_are_registered(self):
+    async def test_only_vetted_read_actions_are_registered(self):
         tools = worker.read_tools("example.com")
         self.assertEqual(set(tools.registry.registry.actions), {"open_page", "read_page", "done"})
         session = Mock(get_current_page=AsyncMock())
         action = tools.registry.registry.actions["open_page"].function
         for url in ("https://127.0.0.1", "https://@example.com/", "https://:@example.com/"):
             with self.subTest(url=url), self.assertRaises(worker.BrowserError):
-                asyncio.run(action(url=url, browser_session=session))
+                await action(url=url, browser_session=session)
         session.get_current_page.assert_not_called()
 
-    def test_page_observations_are_structured_and_reject_foreign_origins(self):
+    async def test_page_observations_are_structured_and_reject_foreign_origins(self):
         tools = worker.read_tools("example.com")
         action = tools.registry.registry.actions["read_page"].function
         for url in ("https://example.com/page", "https://other.example/page", "http://127.0.0.1",
@@ -38,15 +37,15 @@ class WorkerConfigurationTests(unittest.TestCase):
             session = Mock(get_current_page=AsyncMock(return_value=page))
             with self.subTest(url=url):
                 if url.startswith("https://example.com/"):
-                    result = asyncio.run(action(browser_session=session))
+                    result = await action(browser_session=session)
                     self.assertEqual(json.loads(result.extracted_content.split("\n", 1)[1]), snapshot)
                     page.goto.assert_not_called()
                 else:
                     with self.assertRaises(worker.BrowserError):
-                        asyncio.run(action(browser_session=session))
+                        await action(browser_session=session)
                     page.goto.assert_awaited_once_with("about:blank")
 
-    def test_local_browser_and_model_are_explicit_without_cloud_fallback(self):
+    async def test_local_browser_and_model_are_explicit_without_cloud_fallback(self):
         browser = Mock(kill=AsyncMock())
         history = Mock()
         history.is_successful.return_value = True
@@ -58,7 +57,7 @@ class WorkerConfigurationTests(unittest.TestCase):
              patch.object(worker, "validate_url", return_value="example.com"), \
              patch.object(worker, "edge_executable", return_value=Path("edge.exe")), \
              patch.object(worker, "edge_profile", return_value=Path("profile")):
-            result = asyncio.run(worker.browse("https://example.com", "Read"))
+            result = await worker.browse("https://example.com", "Read")
         self.assertTrue(result["ok"])
         options = factory.call_args.kwargs
         self.assertFalse(options["use_cloud"])
@@ -76,7 +75,7 @@ class WorkerConfigurationTests(unittest.TestCase):
         agent.run.assert_awaited_once_with(max_steps=6)
         browser.kill.assert_awaited_once()
 
-    def test_real_sdk_accepts_agent_configuration_without_launching_browser(self):
+    async def test_real_sdk_accepts_agent_configuration_without_launching_browser(self):
         from browser_use import Agent, Browser
 
         history = Mock()
@@ -91,7 +90,7 @@ class WorkerConfigurationTests(unittest.TestCase):
                      patch.object(worker, "validate_url", return_value="example.com"), \
                      patch.object(Browser, "kill", new=AsyncMock()), \
                      patch.object(Agent, "run", new=AsyncMock(return_value=history)):
-                    result = asyncio.run(worker.browse("https://example.com", "Read"))
+                    result = await worker.browse("https://example.com", "Read")
                 self.assertTrue(result["ok"])
             finally:
                 os.chdir(previous)

@@ -35,6 +35,32 @@ Solo se mantienen en caché las instrucciones base. En cada turno se comparan pa
 
 El bloque completo incluye hasta cinco registros y 1.200 caracteres Unicode, contando encabezado y formato. Los registros que no caben se omiten completos y se prueban los siguientes; no se modifica SQLite. Sin coincidencias o espacio, se indica ausencia de recuerdos pertinentes para ese turno. El límite es aproximado respecto a tokens, sin tokenizadores ni dependencias nuevas; no garantiza 300 tokens ni limita toda la solicitud. No hay búsqueda semántica, catálogo de sinónimos ni controles nuevos de exclusión cloud. El historial puede conservar datos mencionados antes.
 
+## Navegación opcional
+
+### Local Browser Use worker
+
+`/navegar <https-url> <task>` is intercepted before memory commands and chat.
+`browser_navigation.py` uses only the standard library and starts
+`browser_worker.py` with the interpreter from `.venv-browser`. Browser Use's
+dependencies never need to be imported into ADA's core environment. The JSON
+request contains only the URL and explicit task; external results are rendered
+as plain data, not executed or added to memory, chat history or online speech.
+
+The worker explicitly selects local Edge and a loopback Ollama model. It does
+not inherit provider credentials, load `.env`, enable Browser Use cloud sync or
+use its default hosted model. A dedicated profile and temporary job directory
+separate browser state from personal profiles and the repository. Browser Use
+anonymous telemetry and automatic extensions/downloads are disabled.
+
+The positive action set contains only `open_page`, `read_page`, and `done`.
+Navigation is limited to the supplied public HTTPS host, with step/time bounds
+and parent-owned process-tree cancellation. No generic shell, file, upload,
+click, form-input or arbitrary-evaluation tool is exposed to the model. Trusted
+adapter code reads page text through CDP. These controls are not a complete
+network or operating-system sandbox; page scripts and subresources remain a
+separate risk. Runtime checks must establish local model/browser compatibility,
+not infer it from package installation or mocked tests.
+
 ## Ciclo de Vida del Comando de Voz (Push-To-Talk)
 
 1. El usuario presiona `ENTER` en un prompt vacío. Solo entonces se importan las dependencias de entrada y se carga Whisper si todavía no está disponible. La primera carga puede requerir descargar el modelo.

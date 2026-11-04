@@ -1,0 +1,2 @@
+# Optional; install only in .venv-browser, not ADA's core environment.
+browser-use==0.13.14

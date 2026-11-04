@@ -18,6 +18,7 @@ import pyfiglet
 
 import memory
 from voice import VoiceEngine
+from browser_navigation import BrowserError, run_task as run_browser_task
 
 console = Console()
 
@@ -231,6 +232,21 @@ def chat_loop(speech_enabled=False):
                 break
 
             # ── 1. Intercepción de Comandos Explícitos ──
+            navigation = re.fullmatch(r"/navegar(?:\s+(.*))?", user_input, re.IGNORECASE | re.DOTALL)
+            if navigation:
+                try:
+                    arguments = (navigation.group(1) or "").split(maxsplit=1)
+                    if len(arguments) != 2:
+                        raise BrowserError("Usa /navegar <https-url> <tarea de lectura>.")
+                    result = run_browser_task(*arguments)
+                    console.print(Panel(Text(result.text), title="Navegación local",
+                                        border_style="#fd2636", padding=(0, 1)))
+                    console.print(Text(result.url))
+                except BrowserError as error:
+                    console.print(Text(str(error), style="red"))
+                # External results never enter chat history, memory or online speech.
+                continue
+
             cmd_response = execute_memory_command(user_input, client, model)
             if cmd_response:
                 # Si el usuario dio un comando, ejecutamos DB, damos la respuesta rápida y cortamos aquí.
@@ -286,7 +302,9 @@ def chat_loop(speech_enabled=False):
             console.print(f"\n[red]❌ {e}[/red]\n")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="ADA: chat por texto con audio opcional.")
+    parser = argparse.ArgumentParser(description="ADA: chat por texto con audio opcional.",
+                                     epilog="En el chat: /navegar <https-url> <tarea> usa Browser Use, "
+                                            "Edge y Ollama locales; consulta README para preparar el entorno opcional.")
     parser.add_argument("--speak", action="store_true",
                         help="Activar respuestas habladas (Edge TTS online con respaldo local).")
     args = parser.parse_args()

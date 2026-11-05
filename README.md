@@ -36,7 +36,8 @@ See [the architecture's data-flow details](ARCHITECTURE.md#flujo-de-datos-y-serv
 
 ## ⚙️ Requirements
 
-- Python 3.10 or later.
+- Python 3.10 or later for core features. Optional browser automation requires
+  Python 3.11 or later, but below Python 4.
 - [Ollama](https://ollama.com/) running locally with the configured model.
 - Windows, Linux, or macOS.
 
@@ -90,7 +91,8 @@ environment, with **local Microsoft Edge and Ollama**. No hosted browser, paid
 model API, or Browser Use account is required. Website access still uses the
 Internet. Other ADA features retain their own documented network behavior.
 
-Prepare the isolated environment on Windows:
+Prepare the isolated environment on Windows using Python 3.11 or later, but below
+Python 4. The `python` command below must refer to that interpreter:
 
 ```powershell
 python -m venv .venv-browser

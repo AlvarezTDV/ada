@@ -237,15 +237,27 @@ class VoiceFallbackTests(unittest.TestCase):
         self.save.side_effect = save
 
         async def scenario():
-            task = asyncio.create_task(self.engine._speak_edge(["First.", "Second."]))
-            for _ in range(200):
-                if self.music.unload.called and len(self.generated) == 2:
-                    break
-                await asyncio.sleep(0.005)
-            self.assertTrue(self.music.unload.called)
-            task.cancel()
-            with self.assertRaises(asyncio.CancelledError):
-                await task
+            loop = asyncio.get_running_loop()
+
+            def completed_playback(executor, function, *args):
+                # This test targets prefetch cancellation, not the playback thread.
+                # An already-completed Future makes that phase deterministic; the
+                # separate playback-cancellation test covers real executor waiting.
+                result = loop.create_future()
+                result.set_result(function(*args))
+                return result
+
+            with patch.object(loop, "run_in_executor", side_effect=completed_playback):
+                task = asyncio.create_task(self.engine._speak_edge(["First.", "Second."]))
+                for _ in range(200):
+                    if self.music.unload.called and len(self.generated) == 2:
+                        break
+                    await asyncio.sleep(0.005)
+                self.assertTrue(self.music.unload.called)
+                self.assertEqual(len(self.generated), 2)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, timeout=1)
         asyncio.run(scenario())
         self.local.say.assert_not_called()
         self.assert_no_audio_files()

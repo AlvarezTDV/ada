@@ -36,7 +36,8 @@ See [the architecture's data-flow details](ARCHITECTURE.md#flujo-de-datos-y-serv
 
 ## ⚙️ Requirements
 
-- Python 3.10 or later.
+- Python 3.10 or later for core features. Optional browser automation requires
+  Python 3.11 or later, but below Python 4.
 - [Ollama](https://ollama.com/) running locally with the configured model.
 - Windows, Linux, or macOS.
 
@@ -82,6 +83,73 @@ Run `python ada.py --help` for the available startup options. Audio dependencies
 - **Text:** Type next to the `🔴 > ` prompt and press `ENTER`.
 - **Microphone:** Leave the input empty and press `ENTER`. On first use, ADA loads Whisper (`base`, CPU/int8); the model may need downloading if it is not cached. When "Grabando..." ("Recording...") appears, speak, then **press ENTER again** to stop recording. The transcription is submitted automatically. Later microphone uses reuse the loaded model.
 - **Spoken responses:** Disabled by default; opt in with `--speak`. Playback initializes on the first response, separately from Whisper. Edge TTS falls back to local synthesis if it fails; if both fail, the written response remains available.
+
+### Optional local browser automation
+
+ADA uses the **Browser Use Python library**, installed separately from its core
+environment, with **local Microsoft Edge and Ollama**. No hosted browser, paid
+model API, or Browser Use account is required. Website access still uses the
+Internet. Other ADA features retain their own documented network behavior.
+
+Prepare the isolated environment on Windows using Python 3.11 or later, but below
+Python 4. The `python` command below must refer to that interpreter:
+
+```powershell
+python -m venv .venv-browser
+.\.venv-browser\Scripts\python.exe -m pip install -r requirements-browser.txt
+```
+
+Edge must already be installed in its standard Program Files location. Start
+Ollama with an already-installed compatible model; the browser model defaults
+to `qwen2.5:3b`. It is never downloaded automatically. To select another installed
+model explicitly, set `ADA_BROWSER_MODEL` before starting ADA. Model availability
+does not guarantee reliable browser reasoning. A `modelo local` task failure
+means the agent did not establish a successful answer; it is not displayed as
+success. Change models only deliberately, never through an automatic cloud or
+model-download fallback.
+
+Start `python ada.py`, then use an explicit URL and a reading task:
+
+```text
+/navegar https://example.com Report the page title and purpose.
+```
+
+This initial capability reads public HTTPS pages on the supplied host. It does
+not log in, fill forms, click buttons, upload/download files, execute model-supplied
+JavaScript, or modify your computer. The model can only open an authorized page,
+read its text, and finish. It sees the explicit task and page data, not ADA's
+system prompt, memories, credentials or chat history. Its generated answer is
+display-only and is not sent to chat history, memory or online speech.
+Page observations include the actual URL, title, language and bounded text;
+foreign-origin observations are rejected. The final answer is model-generated,
+not a verbatim quotation or a guarantee of factual accuracy. Check important
+claims against the source, especially with smaller local models.
+
+The worker uses an isolated local process, headless Edge, and a disposable
+profile in its temporary job directory outside the repository. It does not
+reuse personal profiles or retain logins. Windows identity paths are preserved
+for Edge startup, while Browser Use configuration and agent files stay in the
+job directory. Anonymous Browser Use telemetry, cloud
+sync, default extensions and downloads are disabled; inherited API keys and
+proxy variables are not passed to the worker. The browser task never switches
+to a hosted model, even if ADA's regular chat uses one.
+
+Tasks have a six-step cap and a 180-second parent-process limit. Ctrl+C cancels
+the task and stops its owned process tree. Failures are not automatically retried
+or reported as successful answers. Ordinary text chat still works without the
+optional environment. Code acceptance covers command routing, isolated SDK
+configuration, URL/action guards, failure handling and process cleanup. Model
+answer quality is a separate manual check: an agent's successful completion
+does not independently verify its claims. Keep reviewing answers against the source.
+
+These are application-level controls, **not an OS sandbox or network firewall**.
+Top-level destination and agent-action restrictions do not isolate every page
+script or subresource request. Do not use a personal authenticated profile for
+untrusted tasks. Browser Use and Edge updates can affect compatibility.
+
+Run core regression tests with `python -B -m unittest discover -s tests -v`.
+Optional library checks use the isolated interpreter and `test_browser_worker.py`;
+real Edge/Ollama evaluation is opt-in and uses only public test content.
 
 Voice fallback tracks completed fragments: if Edge generation or playback fails, local synthesis continues from the first unfinished fragment instead of repeating the whole response. A fragment interrupted during playback restarts from its beginning, so a few words may repeat; exact word-level recovery is not guaranteed. Empty or missing generated audio also triggers fallback. If both engines fail, ADA reports the problem and keeps text chat available.
 

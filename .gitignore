@@ -6,5 +6,6 @@ __pycache__/
 *.log
 .vscode/
 .idea/
+/.venv-browser/
 /.atl/skill-registry.md
 /.atl/.skill-registry.cache.json

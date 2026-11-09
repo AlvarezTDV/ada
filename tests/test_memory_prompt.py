@@ -116,7 +116,7 @@ class LocalModelEvaluation(IsolatedPromptFixture):
             timeout=30, max_retries=0,
         ) as client:
             response = client.chat.completions.create(
-                model=ada.DEFAULT_MODEL,
+                model=ada.DEFAULT_LOCAL_MODEL,
                 messages=[
                     {"role": "system", "content": ada.get_system_prompt(reload=True, query=current_turn)},
                     {"role": "user", "content": current_turn},

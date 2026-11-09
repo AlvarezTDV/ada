@@ -23,7 +23,7 @@ from browser_navigation import BrowserError, run_task as run_browser_task
 console = Console()
 
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
-DEFAULT_GROQ_MODELS = ("llama-3.3-70b-versatile", "openai/gpt-oss-20b")
+DEFAULT_GROQ_MODELS = ("openai/gpt-oss-20b", "openai/gpt-oss-120b")
 DEFAULT_GROQ_MODEL = DEFAULT_GROQ_MODELS[0]
 DEFAULT_LOCAL_URL = "http://localhost:11434/v1"
 DEFAULT_LOCAL_MODEL = "qwen2.5:3b"

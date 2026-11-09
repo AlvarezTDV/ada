@@ -56,10 +56,10 @@ class GroqChatProviderTests(IsolatedPromptFixture):
             ada.chat_loop(speech_enabled=speech_enabled)
         return requests, console, voice.return_value, display
 
-    def test_default_provider_is_groq_with_llama_70b_and_missing_key_raises_config_error(self):
+    def test_default_provider_is_groq_with_gpt_oss_20b_and_missing_key_raises_config_error(self):
         self.assertEqual(ada.GROQ_BASE_URL, "https://api.groq.com/openai/v1")
         self.assertEqual(ada.DEFAULT_GROQ_MODELS,
-                         ("llama-3.3-70b-versatile", "openai/gpt-oss-20b"))
+                         ("openai/gpt-oss-20b", "openai/gpt-oss-120b"))
         self.assertEqual(ada.DEFAULT_MODEL, ada.DEFAULT_GROQ_MODELS[0])
         with patch.object(ada, "OpenAI") as factory:
             for value in (None, "", "  "):
@@ -136,12 +136,12 @@ class GroqChatProviderTests(IsolatedPromptFixture):
             [status_error(openai.RateLimitError, 429), completion(), completion()],
             ["hola", "otra pregunta"])
         self.assertEqual([r["model"] for r in requests],
-                         [ada.DEFAULT_MODEL, "openai/gpt-oss-20b", "openai/gpt-oss-20b"])
+                         [ada.DEFAULT_MODEL, "openai/gpt-oss-120b", "openai/gpt-oss-120b"])
 
     def test_groq_instruct_requests_omit_ollama_options_while_reasoning_models_set_low_effort(self):
         messages = [{"role": "user", "content": "hola"}]
         for url, model, think, extra in (
-            (ada.GROQ_BASE_URL, ada.DEFAULT_MODEL, False, None),
+            (ada.GROQ_BASE_URL, "llama-3.3-70b-versatile", False, None),
             (ada.GROQ_BASE_URL, "openai/gpt-oss-20b", False,
              {"reasoning_effort": "low", "include_reasoning": False}),
             (ada.GROQ_BASE_URL, "qwen/qwen3-32b", True,
@@ -199,7 +199,7 @@ class GroqChatProviderTests(IsolatedPromptFixture):
             self.assertEqual(ada.execute_memory_command("anota bebida", client, ada.DEFAULT_MODEL),
                              "Información guardada.")
         fallback = client.chat.completions.create.call_args.kwargs
-        self.assertEqual(fallback["model"], "openai/gpt-oss-20b")
+        self.assertEqual(fallback["model"], "openai/gpt-oss-120b")
         self.assertEqual(fallback["max_tokens"], 300)
         self.assertEqual(memory.get_all_memories(), [("bebidas", "bebida", "agua")])
 

@@ -116,7 +116,7 @@ class LocalRetrievalEvaluation(IsolatedPromptFixture):
         with OpenAI(base_url="http://127.0.0.1:11434/v1", api_key="not-needed",
                     timeout=30, max_retries=0) as client:
             response = client.chat.completions.create(
-                model=ada.DEFAULT_MODEL, temperature=0, max_tokens=96,
+                model=ada.DEFAULT_LOCAL_MODEL, temperature=0, max_tokens=96,
                 messages=[{"role": "system", "content": ada.get_system_prompt(query=query)},
                           {"role": "user", "content": query}],
                 extra_body={"options": {"think": False, "num_ctx": 2048}},

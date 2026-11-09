@@ -8,10 +8,10 @@ import argparse
 # Suprimir el banner de pygame antes de importarlo
 os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "hide"
 
+import openai
 from openai import OpenAI
 from rich.console import Console
 from rich.panel import Panel
-from rich.prompt import Prompt
 from rich.text import Text
 from rich.align import Align
 import pyfiglet
@@ -22,8 +22,17 @@ from browser_navigation import BrowserError, run_task as run_browser_task
 
 console = Console()
 
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+DEFAULT_GROQ_MODELS = ("llama-3.3-70b-versatile", "openai/gpt-oss-20b")
+DEFAULT_GROQ_MODEL = DEFAULT_GROQ_MODELS[0]
 DEFAULT_LOCAL_URL = "http://localhost:11434/v1"
-DEFAULT_MODEL = "qwen2.5:3b"
+DEFAULT_LOCAL_MODEL = "qwen2.5:3b"
+DEFAULT_MODEL = DEFAULT_GROQ_MODEL
+CHAT_TIMEOUT_SECONDS = 25.0
+
+
+class ChatConfigError(Exception):
+    pass
 
 MODE_EMOJI = {
     "casual":    "💬",
@@ -47,13 +56,108 @@ def get_system_prompt(reload: bool = False, *, query: str = "") -> str:
 
     return f"{_CACHED_SYSTEM_PROMPT}\n\n{memory.select_memories_for_prompt(query)}"
 
-def get_client():
-    api_key = os.getenv("OPENAI_API_KEY")
+def get_groq_model_chain() -> list[str]:
+    configured = os.getenv("ADA_GROQ_MODELS")
+    if configured and configured.strip():
+        models = [model.strip() for model in configured.split(",") if model.strip()]
+        return models or list(DEFAULT_GROQ_MODELS)
+    legacy = (os.getenv("ADA_GROQ_MODEL") or "").strip()
+    if configured is None and legacy:
+        return list(dict.fromkeys([legacy, *DEFAULT_GROQ_MODELS]))
+    return list(DEFAULT_GROQ_MODELS)
+
+
+def get_client(provider: str = "groq") -> tuple[OpenAI, str]:
+    provider = (provider or os.getenv("ADA_CHAT_PROVIDER") or "groq").strip().lower()
+    if provider == "groq":
+        api_key = (os.getenv("GROQ_API_KEY") or "").strip()
+        if not api_key:
+            raise ChatConfigError("Falta GROQ_API_KEY. Configúrala en tu entorno o inicia con --provider local.")
+        return OpenAI(base_url=GROQ_BASE_URL, api_key=api_key,
+                      timeout=CHAT_TIMEOUT_SECONDS, max_retries=0), get_groq_model_chain()[0]
+    if provider == "local":
+        return OpenAI(base_url=DEFAULT_LOCAL_URL, api_key="not-needed",
+                      timeout=CHAT_TIMEOUT_SECONDS, max_retries=0), (os.getenv("ADA_LOCAL_MODEL") or DEFAULT_LOCAL_MODEL).strip()
+    raise ChatConfigError("Proveedor de conversación no válido. Usa --provider groq o --provider local.")
+
+
+def _is_reasoning_model(model: str) -> bool:
+    return model.lower().startswith(("openai/gpt-oss-", "qwen/qwen3", "deepseek-r1"))
+
+
+def _is_local_client(client, model: str) -> bool:
+    base_url = str(getattr(client, "base_url", ""))
+    return (any(host in base_url for host in ("11434", "localhost", "127.0.0.1"))
+            or (model == DEFAULT_LOCAL_MODEL and not base_url.startswith(GROQ_BASE_URL)))
+
+
+def _build_completion_kwargs(client, model: str, messages: list, *,
+                             temperature: float, max_tokens: int, think: bool) -> dict:
+    kwargs = {"model": model, "messages": messages,
+              "temperature": temperature, "max_tokens": max_tokens}
+    if _is_local_client(client, model):
+        kwargs["extra_body"] = {"options": {"think": think, "num_ctx": 2048}}
+    elif _is_reasoning_model(model):
+        kwargs["extra_body"] = {"reasoning_effort": "medium" if think else "low",
+                                "include_reasoning": False}
+    return kwargs
+
+
+def _redact_provider_text(text: str) -> str:
+    api_key = (os.getenv("GROQ_API_KEY") or "").strip()
     if api_key:
-        use_cloud = Prompt.ask("¿Usar Nube o Local?", choices=["nube", "local"], default="local")
-        if use_cloud == "nube":
-            return OpenAI(api_key=api_key), "gpt-4o-mini"
-    return OpenAI(base_url=DEFAULT_LOCAL_URL, api_key="not-needed"), DEFAULT_MODEL
+        text = text.replace(api_key, "[REDACTED]")
+    return re.sub(r"gsk_[A-Za-z0-9]+", "[REDACTED]", text)
+
+
+def create_chat_completion_with_fallback(client, model: str, messages: list, *,
+                                         temperature: float, max_tokens: int,
+                                         think: bool = False, provider: str = "groq") -> tuple[object, str]:
+    chain = get_groq_model_chain()
+    candidates = [model]
+    if ((provider == "groq" or str(getattr(client, "base_url", "")).startswith(GROQ_BASE_URL))
+            and not _is_local_client(client, model) and model in chain):
+        candidates = chain[chain.index(model):]
+    for index, candidate in enumerate(candidates):
+        # A rotated reasoning model also needs room for its internal tokens.
+        budget = max(max_tokens, 300) if _is_reasoning_model(candidate) else max_tokens
+        try:
+            response = client.chat.completions.create(**_build_completion_kwargs(
+                client, candidate, messages, temperature=temperature,
+                max_tokens=budget, think=think))
+            return response, candidate
+        except openai.RateLimitError:
+            if index + 1 == len(candidates):
+                raise
+            notice = _redact_provider_text(
+                f"Cuota agotada en {candidate}; cambiando a modelo de respaldo: {candidates[index + 1]}")
+            console.print(Text(notice, style="dim #fd2636"))
+
+
+def format_provider_error(error: Exception) -> str:
+    if isinstance(error, ChatConfigError):
+        message = str(error)
+    elif isinstance(error, openai.AuthenticationError):
+        message = "Error de autenticación (401). Revisa la clave del proveedor de conversación."
+    elif isinstance(error, openai.PermissionDeniedError):
+        message = "Acceso denegado (403). Revisa los permisos de la clave y del modelo."
+    elif isinstance(error, openai.RateLimitError):
+        message = "Cuota agotada (429) en todos los modelos disponibles. Inténtalo más tarde."
+    elif isinstance(error, openai.APITimeoutError):
+        message = "Se agotó el tiempo de espera del proveedor. Inténtalo de nuevo."
+    elif isinstance(error, openai.APIConnectionError):
+        message = "No se pudo establecer conexión con el proveedor. Revisa la red o el servicio local."
+    elif isinstance(error, openai.BadRequestError):
+        message = "El proveedor rechazó la solicitud (400). Revisa el modelo y sus parámetros."
+    else:
+        message = "No se pudo completar la operación. Inténtalo de nuevo."
+    return _redact_provider_text(message)
+
+
+def _completion_text(response) -> str:
+    if not response.choices or getattr(response.choices[0], "finish_reason", None) == "length":
+        return ""
+    return (response.choices[0].message.content or "").strip()
 
 # ─── Comandos Directos de Memoria (Arquitectura Híbrida) ──────────────────────
 
@@ -95,16 +199,19 @@ Texto: "{text}"
 Responde ÚNICAMENTE con el array JSON válido."""
         try:
             with console.status("[dim #fd2636]Procesando orden de guardado...[/dim #fd2636]"):
-                res = client.chat.completions.create(
-                    model=model, messages=[{"role": "user", "content": prompt}],
-                    temperature=0.0, max_tokens=150
+                res, _ = create_chat_completion_with_fallback(
+                    client, model, [{"role": "user", "content": prompt}],
+                    temperature=0.0, max_tokens=max(150, 300) if _is_reasoning_model(model) else 150,
+                    provider="local" if _is_local_client(client, model) else "groq",
                 )
-            content = res.choices[0].message.content.strip()
+            content = _completion_text(res)
             data = _parse_memory_array(content)
             saved = memory.save_memories(data)
             for item in saved:
                 console.print(f"  [dim #fd2636]🧠 Anotado: {item['key']} -> {item['value']}[/dim #fd2636]")
             return "Información guardada."
+        except openai.APIError:
+            raise
         except Exception:
             pass
         return "Hubo un error al intentar extraer y guardar la información."
@@ -124,11 +231,12 @@ Texto del usuario: "{text}"
 Responde ÚNICAMENTE con un array JSON de strings con las claves de la lista que coincidan lógicamente. Si no hay coincidencias semánticas, responde []."""
         try:
             with console.status("[dim #fd2636]Procesando orden de borrado...[/dim #fd2636]"):
-                res = client.chat.completions.create(
-                    model=model, messages=[{"role": "user", "content": prompt}],
-                    temperature=0.0, max_tokens=50
+                res, _ = create_chat_completion_with_fallback(
+                    client, model, [{"role": "user", "content": prompt}],
+                    temperature=0.0, max_tokens=max(50, 300) if _is_reasoning_model(model) else 50,
+                    provider="local" if _is_local_client(client, model) else "groq",
                 )
-            content = res.choices[0].message.content.strip()
+            content = _completion_text(res)
             keys_to_delete = memory.validate_memory_keys(_parse_memory_array(content))
             if any(key not in keys for key in keys_to_delete):
                 raise ValueError("Deletion keys must belong to the offered memories")
@@ -138,6 +246,8 @@ Responde ÚNICAMENTE con un array JSON de strings con las claves de la lista que
                     console.print(f"  [dim #fd2636]🗑️ Olvidado: {k}[/dim #fd2636]")
                 return "Información eliminada de mi base de datos."
             return "No encontré ese dato en mi memoria para borrarlo."
+        except openai.APIError:
+            raise
         except Exception:
             pass
         return "Hubo un error al procesar el borrado de memoria."
@@ -194,11 +304,11 @@ def print_ada_response(text: str, mode: str):
 
 # ─── Bucle Principal ──────────────────────────────────────────────────────────
 
-def chat_loop(speech_enabled=False):
+def chat_loop(speech_enabled=False, provider="groq"):
     memory.init_db()
     print_header()
 
-    client, model = get_client()
+    client, model = get_client(provider)
     voice_engine = VoiceEngine(mode="edge")
 
     messages = [{"role": "system", "content": get_system_prompt()}]
@@ -249,6 +359,9 @@ def chat_loop(speech_enabled=False):
 
             cmd_response = execute_memory_command(user_input, client, model)
             if cmd_response:
+                if cmd_response.startswith("Hubo un error"):
+                    console.print(Text(format_provider_error(ChatConfigError(cmd_response)), style="red"))
+                    continue
                 # Si el usuario dio un comando, ejecutamos DB, damos la respuesta rápida y cortamos aquí.
                 print_ada_response(cmd_response, "task")
                 if speech_enabled:
@@ -263,35 +376,35 @@ def chat_loop(speech_enabled=False):
                 continue  # NO invocamos al LLM para charlar. Salto directo al próximo turno.
 
             # ── 2. Conversación Normal ──
-            messages[0] = {"role": "system", "content": get_system_prompt(query=user_input)}
-            messages.append({"role": "user", "content": user_input})
-            if len(messages) > 11:
-                messages = [messages[0]] + messages[-10:]
+            turn_messages = [{"role": "system", "content": get_system_prompt(query=user_input)},
+                             *messages[1:], {"role": "user", "content": user_input}]
+            if len(turn_messages) > 11:
+                turn_messages = [turn_messages[0]] + turn_messages[-10:]
 
             mode_info = classify_input_mode(user_input)
             mode, temperature, max_tokens, think = mode_info["mode"], mode_info["temperature"], mode_info["max_tokens"], mode_info["think"]
 
             think_label = "Ada razonando..." if think else "Ada..."
             with console.status(f"[dim #fd2636]{think_label}[/dim #fd2636]"):
-                response = client.chat.completions.create(
-                    model=model, messages=messages, temperature=temperature, max_tokens=max_tokens,
-                    extra_body={"options": {"think": think, "num_ctx": 2048}},
+                response, model = create_chat_completion_with_fallback(
+                    client, model, turn_messages, temperature=temperature, max_tokens=max_tokens,
+                    think=think, provider=provider,
                 )
-            ada_response = response.choices[0].message.content.strip()
+            ada_response = _completion_text(response)
 
             if not ada_response:
                 with console.status("[dim #fd2636]Reintentando...[/dim #fd2636]"):
-                    fallback_response = client.chat.completions.create(
-                        model=model, messages=messages, temperature=temperature, max_tokens=max_tokens * 3,
-                        extra_body={"options": {"think": False, "num_ctx": 2048}},
+                    fallback_response, model = create_chat_completion_with_fallback(
+                        client, model, turn_messages, temperature=temperature, max_tokens=max_tokens * 3,
+                        think=False, provider=provider,
                     )
-                ada_response = fallback_response.choices[0].message.content.strip()
+                ada_response = _completion_text(fallback_response)
 
             if not ada_response:
-                ada_response = "..."
+                raise ChatConfigError("El proveedor devolvió una respuesta vacía o truncada tras el reintento.")
 
             print_ada_response(ada_response, mode)
-            messages.append({"role": "assistant", "content": ada_response})
+            messages = [*turn_messages, {"role": "assistant", "content": ada_response}]
             if speech_enabled:
                 voice_engine.speak(ada_response)
 
@@ -299,13 +412,24 @@ def chat_loop(speech_enabled=False):
             console.print("\n[dim #fd2636]Nos vemos.[/dim #fd2636]")
             break
         except Exception as e:
-            console.print(f"\n[red]❌ {e}[/red]\n")
+            console.print(Text(f"\n❌ {format_provider_error(e)}\n", style="red"))
 
-if __name__ == "__main__":
+
+def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="ADA: chat por texto con audio opcional.",
                                      epilog="En el chat: /navegar <https-url> <tarea> usa Browser Use, "
                                             "Edge y Ollama locales; consulta README para preparar el entorno opcional.")
     parser.add_argument("--speak", action="store_true",
                         help="Activar respuestas habladas (Edge TTS online con respaldo local).")
-    args = parser.parse_args()
-    chat_loop(speech_enabled=args.speak)
+    parser.add_argument("--provider", choices=["groq", "local"], default="groq",
+                        help="Proveedor de conversación: groq (por defecto) o local (Ollama).")
+    return parser
+
+
+if __name__ == "__main__":
+    args = build_argument_parser().parse_args()
+    try:
+        chat_loop(speech_enabled=args.speak, provider=args.provider)
+    except ChatConfigError as error:
+        console.print(Text(format_provider_error(error), style="red"))
+        sys.exit(1)

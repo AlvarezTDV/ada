@@ -12,6 +12,7 @@ from .ports import (
     ExtensionLifecyclePort, MemoryPort, ReasoningPort, SpeechInputPort,
     SpeechOutputPort, WebNavigationPort,
 )
+from .registry import ExtensionRegistry, ExtensionState, HealthReport
 
 __all__ = [
     "CORE_CONTRACT_VERSION", "ChatMessage", "CompletionRequest", "CompletionResponse",
@@ -20,4 +21,5 @@ __all__ = [
     "SideEffectProfile", "redact_secrets", "ExecutionModel", "ExtensionManifest",
     "PermissionSet", "ExtensionLifecyclePort", "MemoryPort", "ReasoningPort",
     "SpeechInputPort", "SpeechOutputPort", "WebNavigationPort",
+    "ExtensionRegistry", "ExtensionState", "HealthReport",
 ]

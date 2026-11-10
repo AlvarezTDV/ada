@@ -170,7 +170,7 @@ Top-level destination and agent-action restrictions do not isolate every page
 script or subresource request. Do not use a personal authenticated profile for
 untrusted tasks. Browser Use and Edge updates can affect compatibility.
 
-Run core regression tests with `python -B -m unittest discover -s tests -v`.
+Run core regression tests with `python scripts/run_tests.py`.
 Optional library checks use the isolated interpreter and `test_browser_worker.py`;
 real Edge/Ollama evaluation is opt-in and uses only public test content.
 
@@ -216,8 +216,18 @@ The character ceiling approximates a small context budget; **it does not guarant
 Run the offline regression tests without starting audio hardware or a language model:
 
 ```bash
-python -B -c "import subprocess, sys; sys.exit(subprocess.run([sys.executable, '-B', '-m', 'unittest', 'discover', '-s', 'tests', '-q'], timeout=45).returncode)"
+python -B scripts/run_tests.py --timeout 45
 ```
+
+The runner forces `ADA_RUN_MODEL_EVALS=0`, even if inherited as `1`. It prints
+only a compact summary on success (green in an interactive terminal), and retries
+the selected suite with `-v` after a failure. Both passes share one total
+`--timeout` budget (45 seconds by default); a timeout kills the test process and
+fails immediately. Use `--pattern "test_memory_retrieval.py"` to select a suite,
+or explicitly pass `--live-evals` to enable the authenticated evaluations below.
+GitHub Actions runs the offline suite on pull requests and pushes to `main`,
+`feat/**`, and `fix/**`, with a five-minute job limit. Its dependencies are only
+`openai`, `rich`, `pyfiglet`, and `httpx`; audio drivers are not required.
 
 The tests use temporary SQLite databases, never your `ada_memory.db`. They check that the storage-disclosure rule has a single source in `system_prompt.txt`, memory-as-data/current-turn guidance, prompt composition, and base-instruction cache/reload behavior. The memory context does not duplicate the disclosure rule. These checks do not prove that a language model follows the instructions.
 

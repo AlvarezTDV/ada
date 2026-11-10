@@ -8,7 +8,7 @@ La transcripción del micrófono y el almacenamiento de recuerdos ocurren en el 
 
 | Componente | Módulo | Tecnología / Patrón |
 |---|---|---|
-| **Cerebro (LLM)** | `ada.py` | Ollama local (`qwen2.5:3b`) o chat en la nube (OpenAI por defecto, `gpt-4o-mini`). Enrutamiento híbrido. |
+| **Cerebro (LLM)** | `ada.py` | Groq by default: `openai/gpt-oss-20b` → `openai/gpt-oss-120b` on HTTP 429. Explicit `--provider local` selects Ollama (`qwen2.5:3b`). Hybrid routing. |
 | **Oídos (STT)** | `voice.py` | `faster-whisper`, cargado en el primer uso del micrófono y reutilizado, procesa matrices NumPy en memoria RAM. |
 | **Voz (TTS)** | `voice.py` | Opcional mediante `--speak`. `edge-tts` con pre-fetching + respaldo `pyttsx3`; dependencias y reproducción inicializadas bajo demanda, sin cargar Whisper. |
 | **Memoria** | `memory.py` | SQLite3 (`ada_memory.db`) con extracción JSON estructurada. |
@@ -16,16 +16,39 @@ La transcripción del micrófono y el almacenamiento de recuerdos ocurren en el 
 
 ## Flujo de datos y servicios externos
 
-La elección del proveedor de chat y la salida de voz son independientes: `get_client()` selecciona el cliente, mientras `chat_loop()` crea un `VoiceEngine(mode="edge")` ligero, sin importar dependencias de audio ni abrir dispositivos. La salida hablada está desactivada salvo que se indique `--speak`. Si existe `OPENAI_API_KEY`, se ofrece elegir entre nube y local, con local como opción predeterminada. Los fallos de audio se informan y permiten continuar por texto.
+Chat and voice-output selection are independent. `get_client()` defaults to Groq
+using `GROQ_API_KEY` and its OpenAI-compatible endpoint; it does not choose local
+chat based on `OPENAI_API_KEY`. `chat_loop()` creates a lightweight
+`VoiceEngine(mode="edge")` without importing audio dependencies or opening devices.
+Speech output remains disabled unless `--speak` is set; audio failures leave text
+chat available.
+
+### Provider configuration
+
+Install core dependencies with `pip install -r requirements.txt`, set
+`GROQ_API_KEY` in the launching environment, and run `python ada.py`.
+`DEFAULT_GROQ_MODELS` defines `openai/gpt-oss-20b` → `openai/gpt-oss-120b`;
+comma-separated `ADA_GROQ_MODELS` overrides the ordered chain.
+`create_chat_completion_with_fallback()` rotates only on HTTP 429. It rebuilds
+request parameters with `_build_completion_kwargs()` for each candidate: Groq
+reasoning models receive low/medium reasoning effort and suppress reasoning
+output, rather than receiving Ollama's `options` payload. Other failures do not
+trigger a provider switch. The interactive SDK timeout is 25 seconds with zero
+SDK retries; evaluation deadlines below are separate.
+
+For local chat, run `ollama run qwen2.5:3b` and `python ada.py --provider local`.
+`ADA_LOCAL_MODEL` changes that chat model without affecting the browser model.
+No Groq key is required in local mode.
 
 | Ruta | Datos y destino |
 |---|---|
 | Transcripción (`voice.py`, `listen_manual_push`) | Whisper recibe el audio del micrófono como una matriz NumPy en memoria. No se envía la grabación a un servicio de transcripción. El texto resultante se procesa como una entrada escrita. |
-| Conversación (`ada.py`, `get_system_prompt` y `chat_loop`) | El proveedor seleccionado recibe el mensaje actual, el historial reciente y el prompt del sistema. Este último incorpora solo los recuerdos seleccionados para el turno mediante `memory.select_memories_for_prompt()`. La selección es local tanto con Ollama como con chat cloud; en cloud, los registros seleccionados se envían al proveedor externo. |
+| Conversación (`ada.py`, `get_system_prompt` y `chat_loop`) | Groq by default, or Ollama with `--provider local`, receives the current message, recent history and system prompt. `memory.select_memories_for_prompt()` selects records locally; default cloud chat sends those selected values to Groq. Quota fallback resends the context to another Groq model. |
 | Guardado (`ada.py`, `execute_memory_command`) | El proveedor seleccionado recibe la orden y su contenido para extraer los datos. SQLite guarda el resultado localmente. La solicitud de extracción no incluye el conjunto de recuerdos existentes. |
 | Borrado (`ada.py`, `execute_memory_command`) | Si hay recuerdos, el proveedor seleccionado recibe la orden y la lista de claves existentes para identificar cuáles borrar. Esta solicitud no incluye sus valores. SQLite ejecuta el borrado localmente; si no hay recuerdos, no se solicita selección al modelo. |
 | Historial de comandos (`ada.py`, `chat_loop`) | La orden de memoria y su confirmación se añaden al historial reciente y pueden enviarse en una conversación cloud posterior. Tras el comando se recargan las instrucciones base; la selección de recuerdos se calcula con el siguiente mensaje conversacional. |
 | Síntesis opcional (`voice.py`, `_speak_edge`) | Con `--speak`, Edge TTS recibe fragmentos del texto de respuesta, después de la limpieza para lectura. Ese texto puede contener datos personales o recuerdos mencionados por ADA, aunque el proveedor del chat sea local. Sin esa opción no se solicita síntesis. |
+| `/navegar` (`browser_navigation.py`, `browser_worker.py`) | Local Edge accesses the requested site. A separate local Ollama model receives only the explicit task and page data, not ADA memories or chat history. Groq credentials are not passed to this worker. |
 
 La ubicación local de `ada_memory.db` no garantiza que los datos guardados permanezcan exclusivamente en el equipo. Eliminar un recuerdo de SQLite tampoco retira copias de información ya enviada a servicios externos. Estas rutas describen el procesamiento de conversaciones, no las descargas de instalación o de modelos.
 
@@ -46,7 +69,9 @@ dependencies never need to be imported into ADA's core environment. The JSON
 request contains only the URL and explicit task; external results are rendered
 as plain data, not executed or added to memory, chat history or online speech.
 
-The worker explicitly selects local Edge and a loopback Ollama model. It does
+The worker explicitly selects local Edge and a loopback Ollama model through
+`ADA_BROWSER_MODEL` (default `qwen2.5:3b`), independently of Groq chat or
+`ADA_LOCAL_MODEL`. Its `.venv-browser` environment remains separate. It does
 not inherit provider credentials, load `.env`, enable Browser Use cloud sync or
 use its default hosted model. A dedicated profile and temporary job directory
 separate browser state from personal profiles and the repository. Browser Use
@@ -60,6 +85,38 @@ adapter code reads page text through CDP. These controls are not a complete
 network or operating-system sandbox; page scripts and subresources remain a
 separate risk. Runtime checks must establish local model/browser compatibility,
 not infer it from package installation or mocked tests.
+
+## Synthetic provider evaluations
+
+`tests/test_memory_prompt.py` and `tests/test_memory_retrieval.py` stay offline
+unless `ADA_RUN_MODEL_EVALS=1`. `ADA_EVAL_PROVIDER` defaults to `groq`; `local`
+selects Ollama. Both reuse the production client, completion options and quota
+fallback. `IsolatedPromptFixture` supplies temporary SQLite databases and synthetic
+records only; the real `ada_memory.db` is never read or transmitted.
+
+The SDK uses `timeout=15, max_retries=0`. Each completion runs in a subprocess
+with a 15-second wall-clock deadline, bounding the whole fallback chain as well
+as stalled I/O. The enclosing authenticated suite is limited to 60 seconds and
+uses fail-fast without automatic paid reruns; HTTP 401 prevents further requests.
+The worker imports ADA/SDK types before the fixture's temporary module patch to
+avoid duplicate SDK classes. An offline real-SDK/MockTransport regression covers
+response parsing; mocked HTTP 429 covers fallback without spending real quota.
+
+On 2026-11-09 the authenticated suite passed 101 tests in 35.128 s (37.469 s
+including process startup), with six synthetic cases/seven completion calls using 20b as primary and
+four optional browser checks skipped. Separate stateless streaming probes used
+`time.perf_counter()` and a short Spanish prompt:
+
+| Model | First visible content | Visible tokens/s after TTFT | Total |
+|---|---:|---:|---:|
+| `openai/gpt-oss-20b` | 1.278 s | 904.6 | 1.312 s |
+| `openai/gpt-oss-120b` | 1.365 s | 669.9 | 1.407 s |
+
+Throughput excludes the six reported reasoning tokens per response and divides
+31/28 visible tokens by `(total - TTFT)`. TTFT excludes reasoning-only and blank
+chunks. These are single short, potentially buffered samples, not sustained
+generation-speed guarantees. See [the evaluation commands and measurement
+details](README.md#measured-groq-evaluation-and-latency-2026-11-09).
 
 ## Ciclo de Vida del Comando de Voz (Push-To-Talk)
 

@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import memory
-from test_memory_prompt import IsolatedPromptFixture, SYSTEM_PROMPT, ada
+from test_memory_prompt import IsolatedPromptFixture, SYSTEM_PROMPT, ada, request_synthetic_answer
 
 
 class MemoryRetrievalTests(IsolatedPromptFixture):
@@ -105,23 +105,37 @@ class MemoryRetrievalTests(IsolatedPromptFixture):
         self.assertEqual(sum(m["role"] == "system" for m in requests[2]), 1)
 
 
-@unittest.skipUnless(os.environ.get("ADA_RUN_MODEL_EVALS") == "1", "Opt-in local Ollama evaluation")
+class RetrievalEvaluationValidationTests(unittest.TestCase):
+    def test_opt_in_retrieval_assertions_and_synthetic_context_remain_offline(self):
+        cases = (
+            ("test_model_uses_relevant_memory_after_topic_change", ["limonada", "Python"]),
+            ("test_model_uses_only_five_available_project_memories", ["LIRIO6"]),
+            ("test_model_can_use_short_record_when_oversized_record_is_omitted", ["limonada"]),
+        )
+        for method, answers in cases:
+            with self.subTest(method=method):
+                case = LocalRetrievalEvaluation(method)
+                case.setUp()
+                try:
+                    with patch(__name__ + ".request_synthetic_answer", side_effect=answers) as request:
+                        getattr(case, method)()
+                        self.assertEqual(request.call_count, len(answers))
+                finally:
+                    case.doCleanups()
+
+
+@unittest.skipUnless(os.environ.get("ADA_RUN_MODEL_EVALS") == "1", "Opt-in synthetic model evaluation")
 class LocalRetrievalEvaluation(IsolatedPromptFixture):
     def ask(self, query, expected):
-        from openai import OpenAI
         before = memory.get_all_memories()
         block = memory.select_memories_for_prompt(query)
         self.assertLessEqual(len(block), 1200)
         self.assertLessEqual(block.count("- [Tema:"), 5)
-        with OpenAI(base_url="http://127.0.0.1:11434/v1", api_key="not-needed",
-                    timeout=30, max_retries=0) as client:
-            response = client.chat.completions.create(
-                model=ada.DEFAULT_LOCAL_MODEL, temperature=0, max_tokens=96,
-                messages=[{"role": "system", "content": ada.get_system_prompt(query=query)},
-                          {"role": "user", "content": query}],
-                extra_body={"options": {"think": False, "num_ctx": 2048}},
-            )
-        answer = response.choices[0].message.content or ""
+        self.assertIn(expected, block)
+        answer = request_synthetic_answer([
+            {"role": "system", "content": ada.get_system_prompt(query=query)},
+            {"role": "user", "content": query},
+        ])
         self.assertIn(expected.casefold(), answer.casefold(), answer)
         self.assertEqual(memory.get_all_memories(), before)
         return block
@@ -137,7 +151,10 @@ class LocalRetrievalEvaluation(IsolatedPromptFixture):
     def test_model_uses_only_five_available_project_memories(self):
         for index in range(7):
             self.remember(f"LIRIO{index}", category="proyectos", key=f"proyecto_{index}")
-        block = self.ask("En proyectos, ¿qué valor tiene proyecto_6? Responde solo el valor.", "LIRIO6")
+        block = self.ask(
+            "Según los recuerdos disponibles de proyectos, ¿qué valor corresponde a la clave "
+            "proyecto_6? Responde solo con el valor de ese recuerdo.", "LIRIO6"
+        )
         self.assertEqual(block.count("- [Tema:"), 5)
         self.assertNotIn("LIRIO0", block)
         self.assertNotIn("LIRIO1", block)

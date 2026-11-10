@@ -13,7 +13,7 @@ A.D.A is a personal conversational assistant designed to run on your computer. I
 - 💬 **Minimal Terminal Interface:** A clean `Rich` interface with ANSI screen updates to reduce console clutter.
 - ⚡ **Reduced Latency:** Hybrid command routing and concurrent text-to-speech (TTS) generation prepare audio while the assistant is speaking.
 
-ADA starts in text mode without loading audio dependencies or opening audio devices. Speech recognition and conversations through local Ollama run on your machine. Optional Edge TTS speech synthesis uses an online service and sends the text to be spoken.
+ADA starts in text mode without loading audio dependencies or opening audio devices. **Conversational chat uses Groq by default**, with `openai/gpt-oss-20b` and automatic quota fallback to `openai/gpt-oss-120b`. Speech recognition runs locally; `--provider local` also keeps chat on Ollama. Optional Edge TTS speech synthesis uses an online service and sends the text to be spoken.
 
 ## Privacy and Data Transfers
 
@@ -22,13 +22,14 @@ ADA starts in text mode without loading audio dependencies or opening audio devi
 | Operation | Where it runs | Data sent to an external service |
 |---|---|---|
 | Microphone transcription | Local Whisper | No microphone recording is sent to a cloud transcription service. The resulting text follows the chat or memory-command route below. |
-| Chat through local Ollama | Your computer | No conversation data is sent to a cloud chat provider. With `--speak`, Edge TTS receives the spoken response text. |
-| Cloud chat | OpenAI by default | Your current message, recent conversation history, and the system prompt, which includes only the memory entries selected for this turn. |
+| Chat through local Ollama (`--provider local`) | Your computer | No conversation data is sent to a cloud chat provider. With `--speak`, Edge TTS receives the spoken response text. |
+| Default cloud chat | Groq (`https://api.groq.com/openai/v1`, using the OpenAI-compatible SDK) | Your current message, recent conversation history, and the system prompt, which includes only the memory entries selected for this turn. Quota fallback resends that context to another model on Groq. |
+| Optional `/navegar` | Local Edge and Ollama in `.venv-browser` | The requested site receives browser traffic. The separate local model receives the explicit task and page data, not chat history or ADA memories. |
 | Save a memory in cloud mode | Cloud chat provider for extraction; SQLite locally for storage | Your save command and the information it contains. |
 | Delete a memory in cloud mode | Cloud chat provider for key selection; SQLite locally for deletion | Your delete command and the names of existing memory keys, not their stored values in this parsing request. No parsing request is made when memory is empty. |
 | Optional voice output through Edge TTS (`--speak`) | Online speech service | Response text after speech cleanup, which can contain personal information or recalled memories. |
 
-When `OPENAI_API_KEY` is present, ADA offers a choice between local and cloud chat; local is the default. Memory-command extraction uses that same selected chat provider. Command text and confirmation messages also enter the recent conversation history and can be included in later cloud chat requests.
+Default chat requires `GROQ_API_KEY`; a missing key reports a configuration error rather than silently switching providers. `OPENAI_API_KEY` is not used for this default. Memory-command extraction uses the selected chat provider too. Command text and confirmation messages also enter the recent conversation history and can be included in later cloud chat requests.
 
 The SQLite database (`ada_memory.db`) is stored locally, but that does not mean its contents always stay on the device: selected memory entries are included in cloud chat context, and information repeated in a response can be sent to Edge TTS. Selection does not remove facts already mentioned in conversation history or provide per-record cloud permissions. Deleting a local memory does not retract information already sent to an external service. This section describes conversation data flows, not installation or model downloads.
 
@@ -38,7 +39,7 @@ See [the architecture's data-flow details](ARCHITECTURE.md#flujo-de-datos-y-serv
 
 - Python 3.10 or later for core features. Optional browser automation requires
   Python 3.11 or later, but below Python 4.
-- [Ollama](https://ollama.com/) running locally with the configured model.
+- A Groq API key for default chat, or [Ollama](https://ollama.com/) for explicit local chat. Optional browser automation always requires local Ollama independently of chat.
 - Windows, Linux, or macOS.
 
 ## 🚀 Installation
@@ -48,10 +49,12 @@ See [the architecture's data-flow details](ARCHITECTURE.md#flujo-de-datos-y-serv
    ```bash
    pip install -r requirements.txt
    ```
-3. Start the configured local model in Ollama (default: `qwen2.5:3b`):
-   ```bash
-   ollama run qwen2.5:3b
+3. Set `GROQ_API_KEY` in the environment used to launch ADA. For example, in PowerShell:
+   ```powershell
+   $env:GROQ_API_KEY = "<your-groq-api-key>"
    ```
+   Do not commit keys or print them in diagnostics. For local chat instead, run
+   `ollama run qwen2.5:3b`, then start ADA with `--provider local`; no Groq key is needed.
 
 ### HTTP 403 During Speech Generation
 
@@ -70,6 +73,26 @@ Start A.D.A by running the main script:
 ```bash
 python ada.py
 ```
+
+The default chain is `openai/gpt-oss-20b` → `openai/gpt-oss-120b`.
+Only HTTP 429 (quota/rate limit) rotates to the next model; authentication,
+permission, timeout and other failures do not silently change providers.
+Override the ordered chain with comma-separated `ADA_GROQ_MODELS`, for example:
+
+```powershell
+$env:ADA_GROQ_MODELS = "openai/gpt-oss-20b,openai/gpt-oss-120b"
+```
+
+To use local Ollama instead:
+
+```bash
+ollama run qwen2.5:3b
+python ada.py --provider local
+```
+
+`ADA_LOCAL_MODEL` overrides the local chat model. `/navegar` does **not** use
+the chat provider or its fallback chain: its separate local model is selected
+by `ADA_BROWSER_MODEL`, and its dependencies stay in `.venv-browser`.
 
 The default conversational prompt and explicit memory commands are in Spanish. To enable spoken responses independently of microphone input:
 
@@ -193,7 +216,7 @@ The character ceiling approximates a small context budget; **it does not guarant
 Run the offline regression tests without starting audio hardware or a language model:
 
 ```bash
-python -B -m unittest discover -s tests -v
+python -B -c "import subprocess, sys; sys.exit(subprocess.run([sys.executable, '-B', '-m', 'unittest', 'discover', '-s', 'tests', '-q'], timeout=45).returncode)"
 ```
 
 The tests use temporary SQLite databases, never your `ada_memory.db`. They check that the storage-disclosure rule has a single source in `system_prompt.txt`, memory-as-data/current-turn guidance, prompt composition, and base-instruction cache/reload behavior. The memory context does not duplicate the disclosure rule. These checks do not prove that a language model follows the instructions.
@@ -206,19 +229,62 @@ Optional-audio tests block audio imports during text startup and mock microphone
 
 Voice-fallback regressions cover explicit outcomes, generation without usable audio, playback failures, fragment-level recovery, and temporary-file cleanup: `python -B -m unittest discover -s tests -p "test_voice_fallback.py" -v`.
 
-For a bounded behavioral evaluation, start Ollama with the configured default model (`qwen2.5:3b`), then opt in from PowerShell:
+For a bounded authenticated evaluation, make `GROQ_API_KEY` available, then opt
+in from PowerShell. Without `ADA_RUN_MODEL_EVALS=1`, these six cases are skipped
+and the standard suite remains offline with zero model requests.
 
 ```powershell
 $env:ADA_RUN_MODEL_EVALS = "1"
-python -B -m unittest discover -s tests -v
-Remove-Item Env:ADA_RUN_MODEL_EVALS
+$env:ADA_EVAL_PROVIDER = "groq"
+try {
+    python -B -c "import subprocess, sys; sys.exit(subprocess.run([sys.executable, '-B', '-m', 'unittest', 'discover', '-s', 'tests', '-q', '-f'], timeout=60).returncode)"
+} finally {
+    Remove-Item Env:ADA_RUN_MODEL_EVALS, Env:ADA_EVAL_PROVIDER
+}
 ```
 
-This evaluation sends synthetic examples only to `127.0.0.1:11434`: a current preference overriding a stored one, an instruction embedded in a matching memory, a direct storage question, and retrieval cases for topic changes, the five-record ceiling, and an omitted oversized record. The storage fixture uses a matching Spanish category. Six test cases make seven requests.
+This evaluation sends **only synthetic examples** to Groq: a current preference
+overriding a stored one, an instruction embedded in a matching memory, a direct
+storage question, and retrieval cases for topic changes, the five-record ceiling,
+and an omitted oversized record. `IsolatedPromptFixture` creates temporary SQLite
+databases; it never reads or sends your `ada_memory.db`. Six cases make seven
+requests without quota fallback. To evaluate Ollama instead, start its model and
+set `ADA_EVAL_PROVIDER=local` in the same opt-in command.
 
 The preference case asks about the same favorite-drink fact stored in memory and checks a labeled current value, ending at punctuation or a line break. An explanation may mention the old preference afterward on the same or another line. A missing label is a response-format failure, not proof of a precedence failure.
 
-The evaluation uses no cloud credentials, personal memories, or audio. Each request has a 30-second timeout and no retries. A missing server/model or a mismatched response fails the evaluation. A successful run is evidence for these examples, not a general prompt-injection guarantee.
+Each evaluation uses the production provider factory, request options and fallback
+chain. SDK requests use `timeout=15, max_retries=0`; a subprocess deadline also
+kills stalled requests after 15 seconds, including any quota fallback attempts.
+The full suite has a 60-second deadline and stops at its first failure (`-f`),
+without automatically repeating paid requests. HTTP 401 blocks further calls.
+These limits apply to the evaluation harness, not normal interactive chat.
+
+### Measured Groq evaluation and latency (2026-11-09)
+
+The authenticated suite passed **101 tests in 35.128 s**, including all six
+synthetic evaluations configured with `openai/gpt-oss-20b` as primary; four optional browser checks were
+skipped. The enclosing process took 37.469 s. The fallback was checked offline
+with a synthetic HTTP 429, not by deliberately exhausting the real quota.
+
+Two separate streaming requests used the same short Spanish prompt asking why
+the sky looks blue, without a database or conversation history:
+
+| Model | First visible content (TTFT) | Visible tokens/s after TTFT | Total request time |
+|---|---:|---:|---:|
+| `openai/gpt-oss-20b` | 1.278 s | 904.6 | 1.312 s |
+| `openai/gpt-oss-120b` | 1.365 s | 669.9 | 1.407 s |
+
+`time.perf_counter()` measured request start, first non-whitespace `delta.content`
+and stream completion; reasoning-only chunks did not count as visible content.
+Groq reported 37/34 completion tokens, including 6 reasoning tokens each.
+Visible throughput is `(completion_tokens - reasoning_tokens) / (total - TTFT)`:
+31/28 visible tokens over very short, potentially buffered streams. End-to-end
+completion throughput, including reasoning and TTFT, was 28.206/24.162 tokens/s.
+The probe process took 6.769 s with 15-second per-request and 60-second overall
+limits. These are single samples, not sustained speed or latency guarantees.
+
+### Historical local evaluations
 
 All three live cases passed locally with `qwen2.5:3b` (3.1B, `Q4_K_M`), using synthetic memories and isolated databases. The test run took 6.74 seconds; this is validation of those three examples, not a general model-quality or latency benchmark.
 

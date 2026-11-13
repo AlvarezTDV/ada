@@ -87,7 +87,8 @@ class IndependentRetrievalTests(IsolatedPromptFixture):
                 text = ''
             else:
                 text = 'OK'
-            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=text))])
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content=text), finish_reason="stop")])
         client = Mock()
         client.chat.completions.create.side_effect = answer
         with patch.object(ada, 'get_client', return_value=(client, 'arbitrary-model')), patch.object(ada, 'VoiceEngine'), patch.object(ada, 'console'), patch('builtins.input', side_effect=['anota bebida', 'hola bebidas', 'crea lista bebidas', 'compara bebidas', 'salir']):

@@ -152,7 +152,7 @@ class NavigationRoutingTests(IsolatedPromptFixture):
         output = io.StringIO()
         client = Mock()
         client.chat.completions.create.return_value = SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content="normal answer"))])
+            choices=[SimpleNamespace(message=SimpleNamespace(content="normal answer"), finish_reason="stop")])
         literal = "[bold]untrusted page result[/bold]"
         result = navigation.BrowserResult(literal, "https://example.com")
         with patch.object(ada, "get_client", return_value=(client, "test")), \
@@ -160,8 +160,11 @@ class NavigationRoutingTests(IsolatedPromptFixture):
              patch.object(ada, "print_header"), \
              patch.object(ada, "console", Console(file=output, force_terminal=False, width=160)), \
              patch.object(ada, "VoiceEngine") as voice, \
+             patch("ada_adapters.browser_navigation_adapter.BrowserUseNavigationAdapter.probe") as probe, \
              patch.object(ada, "run_browser_task", return_value=result) as run, \
              patch("builtins.input", side_effect=["hola", "/navegar https://example.com Read title", "continue", "salir"]):
+            from ada_core import ExtensionState, HealthReport
+            probe.return_value = HealthReport(ExtensionState.READY)
             ada.chat_loop()
         run.assert_called_once_with("https://example.com", "Read title")
         self.assertIn(literal, output.getvalue())
@@ -177,9 +180,12 @@ class NavigationRoutingTests(IsolatedPromptFixture):
              patch.object(ada, "get_system_prompt", return_value="system"), \
              patch.object(ada, "print_header"), patch.object(ada, "console"), \
              patch.object(ada, "VoiceEngine"), \
+             patch("ada_adapters.browser_navigation_adapter.BrowserUseNavigationAdapter.probe") as probe, \
              patch.object(ada, "run_browser_task", side_effect=navigation.BrowserError("Safe failure")) as run, \
              patch("builtins.input", side_effect=["/navegar", "/navegar https://example.com",
                                                 "/navegar https://example.com Read", "salir"]):
+            from ada_core import ExtensionState, HealthReport
+            probe.return_value = HealthReport(ExtensionState.READY)
             ada.chat_loop()
         run.assert_called_once()
         client.chat.completions.create.assert_not_called()

@@ -40,6 +40,24 @@ class SqliteMemoryAdapter:
     def shutdown(self) -> None:
         """No persistent connection is owned by this adapter."""
 
+    def list_all(self) -> tuple[MemoryItem, ...]:
+        with self._errors():
+            return tuple(MemoryItem(*row) for row in memory.get_all_memories())
+
+    def save_batch(self, items: tuple[MemoryItem, ...]) -> tuple[MemoryItem, ...]:
+        with self._errors():
+            if not all(isinstance(item, MemoryItem) for item in items):
+                raise ValueError("items must contain MemoryItem values")
+            saved = memory.save_memories([
+                {"category": item.category, "key": item.key, "value": item.value}
+                for item in items
+            ])
+            return tuple(MemoryItem(**item) for item in saved)
+
+    def delete_batch(self, keys: tuple[str, ...]) -> tuple[str, ...]:
+        with self._errors():
+            return tuple(memory.delete_memories(list(keys)))
+
     def recall(self, query: str) -> tuple[MemoryItem, ...]:
         with self._errors():
             if not isinstance(query, str):

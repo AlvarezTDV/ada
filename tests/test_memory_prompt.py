@@ -17,8 +17,17 @@ import memory
 # Prompt tests must not import or initialize speech hardware or Whisper models.
 voice_stub = types.ModuleType("voice")
 voice_stub.VoiceEngine = object
-with patch.dict("sys.modules", {"voice": voice_stub}):
+_missing_voice = object()
+_previous_voice = sys.modules.get("voice", _missing_voice)
+sys.modules["voice"] = voice_stub
+try:
     ada = importlib.import_module("ada")
+finally:
+    # Restore only the stubbed module, retaining Ada and its dependency identities.
+    if _previous_voice is _missing_voice:
+        sys.modules.pop("voice", None)
+    else:
+        sys.modules["voice"] = _previous_voice
 
 ROOT = Path(__file__).resolve().parents[1]
 SYSTEM_PROMPT = (ROOT / "system_prompt.txt").read_text(encoding="utf-8")
@@ -74,6 +83,64 @@ def request_synthetic_answer(messages):
             EVAL_AUTH_FAILED = True
         raise RuntimeError(f"Synthetic evaluation failed: {response['error']} (HTTP {response['status']})")
     return response["answer"]
+
+
+class PromptImportIsolationTests(unittest.TestCase):
+    def test_fixture_import_preserves_module_identity_and_restores_only_voice(self):
+        script = """
+import builtins
+import io
+import sys
+import types
+
+sys.path.insert(0, "tests")
+previous_voice = types.ModuleType("voice") if sys.argv[1] == "present" else None
+if previous_voice is not None:
+    sys.modules["voice"] = previous_voice
+else:
+    sys.modules.pop("voice", None)
+
+original_import = builtins.__import__
+def guarded_import(name, *args, **kwargs):
+    if name.split(".")[0] in {
+        "faster_whisper", "pyaudio", "numpy", "pygame", "edge_tts",
+        "pyttsx3", "browser_use", "playwright",
+    }:
+        raise AssertionError("Unexpected optional import: " + name)
+    return original_import(name, *args, **kwargs)
+builtins.__import__ = guarded_import
+
+import test_memory_prompt as fixture
+from rich.console import Console
+from rich.panel import Panel
+from rich.text import Text
+
+assert sys.modules.get("ada") is fixture.ada, "Ada was removed from the module cache"
+assert fixture.ada.Console is Console, "Console identity changed"
+assert fixture.ada.Panel is Panel, "Panel identity changed"
+assert fixture.ada.Text is Text, "Text identity changed"
+if previous_voice is None:
+    assert "voice" not in sys.modules, "Voice stub leaked"
+else:
+    assert sys.modules["voice"] is previous_voice, "Existing voice module was not restored"
+
+output = io.StringIO()
+console = Console(file=output, force_terminal=False, width=80)
+console.print(fixture.ada.Text("text probe"))
+console.print(fixture.ada.Panel("panel probe"))
+assert "text probe" in output.getvalue()
+assert "panel probe" in output.getvalue()
+print("Module identities and rendering preserved")
+"""
+        for voice_state in ("absent", "present"):
+            with self.subTest(voice=voice_state):
+                result = subprocess.run(
+                    [sys.executable, "-B", "-c", script, voice_state],
+                    cwd=ROOT, capture_output=True, text=True, timeout=15,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), "Module identities and rendering preserved")
+                self.assertEqual(result.stderr, "")
 
 
 class IsolatedPromptFixture(unittest.TestCase):

@@ -38,7 +38,7 @@ CHAIN = "llama-3.3-70b-versatile,openai/gpt-oss-20b,openai/gpt-oss-120b"
 
 class AdapterConformanceTests(unittest.TestCase):
     def setUp(self):
-        # The shared voice fixture restores sys.modules, including its ada entry.
+        # Bind provider imports to the shared Ada fixture during HTTP-double tests.
         modules = patch.dict("sys.modules", {"ada": ada})
         modules.start()
         self.addCleanup(modules.stop)

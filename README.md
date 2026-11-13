@@ -12,6 +12,7 @@ A.D.A is a personal conversational assistant designed to run on your computer. I
 - 🧠 **Persistent Memory:** Remember personal information and preferences in a local SQLite database (`ada_memory.db`).
 - 💬 **Minimal Terminal Interface:** A clean `Rich` interface with ANSI screen updates to reduce console clutter.
 - ⚡ **Reduced Latency:** Hybrid command routing and concurrent text-to-speech (TTS) generation prepare audio while the assistant is speaking.
+- 🧩 **Replaceable Extensions:** A hexagonal core and microkernel registry isolate reasoning, memory, speech, and navigation. `/estado` reports live local extension diagnostics and the last confirmed chat model.
 
 ADA starts in text mode without loading audio dependencies or opening audio devices. **Conversational chat uses Groq by default**, with `openai/gpt-oss-20b` and automatic quota fallback to `openai/gpt-oss-120b`. Speech recognition runs locally; `--provider local` also keeps chat on Ollama. Optional Edge TTS speech synthesis uses an online service and sends the text to be spoken.
 
@@ -29,7 +30,7 @@ ADA starts in text mode without loading audio dependencies or opening audio devi
 | Delete a memory in cloud mode | Cloud chat provider for key selection; SQLite locally for deletion | Your delete command and the names of existing memory keys, not their stored values in this parsing request. No parsing request is made when memory is empty. |
 | Optional voice output through Edge TTS (`--speak`) | Online speech service | Response text after speech cleanup, which can contain personal information or recalled memories. |
 
-Default chat requires `GROQ_API_KEY`; a missing key reports a configuration error rather than silently switching providers. `OPENAI_API_KEY` is not used for this default. Memory-command extraction uses the selected chat provider too. Command text and confirmation messages also enter the recent conversation history and can be included in later cloud chat requests.
+Default chat requires `GROQ_API_KEY`; a missing key leaves the session in an honest limited mode rather than silently switching providers. `OPENAI_API_KEY` is not used for this default. Memory-command extraction uses the selected chat provider too. Command text and confirmed results also enter the recent conversation history and can be included in later cloud chat requests.
 
 The SQLite database (`ada_memory.db`) is stored locally, but that does not mean its contents always stay on the device: selected memory entries are included in cloud chat context, and information repeated in a response can be sent to Edge TTS. Selection does not remove facts already mentioned in conversation history or provide per-record cloud permissions. Deleting a local memory does not retract information already sent to an external service. This section describes conversation data flows, not installation or model downloads.
 
@@ -104,8 +105,43 @@ Run `python ada.py --help` for the available startup options. Audio dependencies
 
 ### Interaction Controls
 - **Text:** Type next to the `🔴 > ` prompt and press `ENTER`.
+- **Diagnostics:** Type `/estado` to inspect registered extensions, their enabled/compatible/available status, failure reasons, and the last confirmed model.
+- **Exit:** Type `salir`, `exit`, or `quit`; these commands and `/estado` work without a reasoning provider.
 - **Microphone:** Leave the input empty and press `ENTER`. On first use, ADA loads Whisper (`base`, CPU/int8); the model may need downloading if it is not cached. When "Grabando..." ("Recording...") appears, speak, then **press ENTER again** to stop recording. The transcription is submitted automatically. Later microphone uses reuse the loaded model.
 - **Spoken responses:** Disabled by default; opt in with `--speak`. Playback initializes on the first response, separately from Whisper. Edge TTS falls back to local synthesis if it fails; if both fail, the written response remains available.
+
+### Extensions and limited mode
+
+`ada.py` builds an `ExtensionRegistry` and delegates turns to
+`ada_core.orchestrator.SessionOrchestrator`. The dependency-free `ada_core`
+defines ports and routing policy; `ada_adapters` bridges them to the existing
+Groq/Ollama clients, SQLite, voice engine, and isolated browser worker.
+
+The default registry lists `reasoning.groq`, `reasoning.ollama_local`,
+`memory.sqlite`, `stt.faster_whisper`, `tts.edge_with_local_fallback`, and
+`navigation.browser_use_edge`. The unselected reasoning provider is `DISABLED`;
+there is no automatic switch from Groq to Ollama.
+
+`/estado` shows `READY`, `DISABLED`, `UNAVAILABLE_DEPENDENCY`, `DEGRADED`, or
+`FAILED`, plus rejected incompatible entries when present. It resolves lazy
+local probes without generating a response, opening audio devices, launching a
+browser, or modifying memory/history. `READY` is **local readiness, not proof of
+working credentials, network, quota, or an installed remote model**. The active
+model is confirmed only by a successful reasoning response.
+
+Browser, microphone, or speech-output failures report their limitation without
+preventing subsequent written chat. A memory-extension failure allows chat with
+an explicit notice that stored memories are unavailable. A reasoning outage,
+invalid key, or exhausted model chain produces no fabricated answer or memory
+success: failed turns do not enter history, and failed extraction never writes
+or deletes memory. You can inspect `/estado`, exit, or send a new turn to retry.
+Empty/truncated chat output gets one bounded retry; memory mutations are never
+automatically repeated. Registry timeouts bound waiting, not termination of
+in-process extension code; a still-running extension stays quarantined.
+Interactive microphone capture is the exception to returning after the registry
+deadline: ADA waits for that capture to release terminal input (finish with
+`ENTER`, or interrupt the session) before accepting another prompt. A completed
+transcription can still be used; recording is never automatically repeated.
 
 ### Optional local browser automation
 

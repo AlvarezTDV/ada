@@ -2,24 +2,100 @@
 
 A.D.A es un asistente conversacional de escritorio con transcripción local opcional, chat local o en la nube y memoria persistente en SQLite. Arranca por texto sin cargar componentes de audio. Con `--speak`, Edge TTS es el motor de síntesis inicial y utiliza un servicio online; esa modalidad no es completamente local.
 
-## Diseño Core
+## Hexagonal core and microkernel
 
-La transcripción del micrófono y el almacenamiento de recuerdos ocurren en el equipo del usuario. El razonamiento depende del proveedor de chat elegido y la síntesis con Edge TTS envía el texto a un servicio externo, incluso cuando el chat usa Ollama local.
+`ada.py` is the composition root and terminal facade, not the session policy
+owner. `create_session()` registers adapters with `register_default_adapters()`
+and constructs `ada_core.orchestrator.SessionOrchestrator`. `chat_loop()` owns
+terminal input/rendering and delegates text, microphone, and optional speech
+output to that orchestrator.
 
-| Componente | Módulo | Tecnología / Patrón |
+```text
+Terminal / ada.py
+    -> SessionOrchestrator (ada_core)
+        -> ExtensionRegistry.execute(capability, operation)
+            -> ReasoningPort / MemoryPort / STT / TTS / WebNavigationPort
+                -> ada_adapters -> existing provider, SQLite, voice, browser modules
+```
+
+`ada_core` imports no SDK, SQLite, voice engine, or browser implementation.
+Immutable request/response values cross its ports; adapter factories perform no
+I/O at registration. The registry is a microkernel: admission, compatibility,
+enable/disable, lazy resolution, failure states, and bounded execution are
+independent of each capability implementation. This is a cooperative extension
+boundary, **not a sandbox or an in-process thread terminator**.
+
+| Capability | Adapter / implementation | Policy |
 |---|---|---|
-| **Cerebro (LLM)** | `ada.py` | Groq by default: `openai/gpt-oss-20b` → `openai/gpt-oss-120b` on HTTP 429. Explicit `--provider local` selects Ollama (`qwen2.5:3b`). Hybrid routing. |
-| **Oídos (STT)** | `voice.py` | `faster-whisper`, cargado en el primer uso del micrófono y reutilizado, procesa matrices NumPy en memoria RAM. |
-| **Voz (TTS)** | `voice.py` | Opcional mediante `--speak`. `edge-tts` con pre-fetching + respaldo `pyttsx3`; dependencias y reproducción inicializadas bajo demanda, sin cargar Whisper. |
-| **Memoria** | `memory.py` | SQLite3 (`ada_memory.db`) con extracción JSON estructurada. |
-| **Interfaz (UI)** | `ada.py` | `rich` (Terminal minimalista, anclado a la izquierda, fixed-width panel). |
+| Reasoning | `reasoning_adapters.py` / existing `ada.py` provider helpers | Groq quota chain, or explicitly selected local Ollama; no automatic cross-provider fallback. |
+| Memory | `memory_sqlite.py` / `memory.py` | Relevant bounded recall; atomic save/delete batches and actual committed results. |
+| STT / TTS | `voice_adapters.py` / `voice.py` | Separate lazy engines and failure states; text remains usable if either is absent or fails. |
+| Navigation | `browser_navigation_adapter.py` / isolated browser worker | Explicit URL/task only; output never enters memory, chat history, or TTS. |
+
+### Memory and facade compatibility
+
+`MemoryPort` retains its existing recall/single-item contract.
+`MemoryCommandPort` is an additional structural protocol for complete ordered
+listing and atomic batches; it does not overload filtered recall as a full key
+catalogue. The SQLite adapter reuses `memory.save_memories()` and
+`memory.delete_memories()` so batch validation, rollback, upsert order, and
+actual-deletion acknowledgements remain unchanged. A replacement supporting only
+`MemoryPort` can still provide chat context; memory commands report the missing
+contract instead of writing directly to SQLite.
+
+The public `get_client`, `get_system_prompt`, `execute_memory_command`,
+`run_browser_task`, `VoiceEngine`, and `chat_loop` facades remain available.
+Command extraction and persistence are injected through registry-backed
+callbacks; pure formatting/validation reuse the existing helpers. Browser and
+voice runner references are resolved from the facade at use time, preserving
+test injection. Direct CLI execution binds the same facade module used by the
+reasoning adapters.
+
+### Diagnostics and fault isolation
+
+`/estado` reports every registered extension's ID, installed/enabled/compatible/
+available status, registry state, active selection, configured model, and reason.
+The default composition includes both reasoning manifests and disables the
+unselected one. Local probes do not call providers, initialize audio hardware,
+launch a browser, or access SQLite. `READY` is local readiness only, not a remote
+health or credential check; the last confirmed model comes from a successful
+completion. Incompatible/disabled/failed entries are not revived by diagnostics.
+
+`/navegar` is intercepted before memory commands and normal chat. The existing
+pure URL guard runs before optional worker preparation, and execution crosses
+`registry.execute(CapabilityKind.NAVIGATION, ...)`. Failures leave history and
+memory unchanged. STT and TTS errors are independent of reasoning and memory.
+
+For chat, selected memory is read through the registry; if unavailable, a visible
+notice accompanies the memory-free response. A provider failure instead returns
+an honest limited-mode error and does not commit the attempted turn. Extraction
+failure never invokes a memory mutation. Empty/truncated chat responses get one
+retry; writes/deletes never do. A new user turn explicitly retries reasoning,
+but `enable()` refuses recovery while a timed-out invocation is still running.
+Registry deadlines bound waiting, not SDK thread termination.
+Interactive STT must additionally release its terminal reader before the next
+prompt: after a registry timeout, the orchestrator waits for that same capture
+to finish and can accept its completed transcription without recording again.
+The timed-out extension remains marked failed until an explicit subsequent
+microphone request can safely re-enable it. Interrupting exits the session
+rather than starting a second competing stdin reader.
+
+Tests injecting `ada.run_browser_task` also double the browser adapter's
+readiness probe (or supply a registry with their own navigation extension).
+Replacing only execution must not bypass production dependency checks.
+
+`tests/test_architectural_resilience.py` exercises missing optional extensions,
+navigation and voice failures, reasoning outages, safe memory-command aborts,
+diagnostics, Groq model fallback, explicit local selection, and SQLite atomicity
+using doubles and temporary databases. It makes no live provider requests.
 
 ## Flujo de datos y servicios externos
 
 Chat and voice-output selection are independent. `get_client()` defaults to Groq
 using `GROQ_API_KEY` and its OpenAI-compatible endpoint; it does not choose local
-chat based on `OPENAI_API_KEY`. `chat_loop()` creates a lightweight
-`VoiceEngine(mode="edge")` without importing audio dependencies or opening devices.
+chat based on `OPENAI_API_KEY`. `chat_loop()` constructs the session registry;
+STT and TTS adapters create their independent `VoiceEngine(mode="edge")` instances
+only when the corresponding feature is requested.
 Speech output remains disabled unless `--speak` is set; audio failures leave text
 chat available.
 

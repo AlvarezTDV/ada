@@ -272,6 +272,23 @@ class VoiceAndBrowserAdapterConformanceTests(unittest.TestCase):
                              WebNavigationResponse("Public text", "https://example.com"))
             runner.assert_called_once_with("https://example.com", "Read")
 
+    def test_stt_adapter_rejects_nonempty_audio_without_initializing_voice_or_recording(self):
+        from ada_adapters import WhisperPushToTalkAdapter
+
+        engine = Mock()
+        factory = Mock(return_value=engine)
+        adapter = WhisperPushToTalkAdapter(voice_factory=factory)
+
+        with self.assertRaises(CapabilityError) as caught:
+            adapter.transcribe(b"recorded audio")
+
+        self.assertEqual(caught.exception.code, ErrorCode.EXECUTION_FAILED)
+        self.assertEqual(caught.exception.capability, CapabilityKind.STT)
+        self.assertEqual(caught.exception.extension_id, "stt.faster_whisper")
+        self.assertEqual(str(caught.exception), "Push-to-talk requires an empty audio buffer.")
+        factory.assert_not_called()
+        engine.listen_manual_push.assert_not_called()
+
     def test_stt_and_tts_adapters_report_health_and_degrade_independently(self):
         from ada_adapters import EdgeLocalTTSAdapter, WhisperPushToTalkAdapter, register_default_adapters
 

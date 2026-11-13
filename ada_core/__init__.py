@@ -9,17 +9,19 @@ from .domain import (
 from .errors import CapabilityError, CapabilityKind, ErrorCode, SideEffectProfile, redact_secrets
 from .manifest import ExecutionModel, ExtensionManifest, PermissionSet
 from .ports import (
-    ExtensionLifecyclePort, MemoryPort, ReasoningPort, SpeechInputPort,
+    ExtensionLifecyclePort, MemoryCommandPort, MemoryPort, ReasoningPort, SpeechInputPort,
     SpeechOutputPort, WebNavigationPort,
 )
 from .registry import ExtensionRegistry, ExtensionState, HealthReport
+from .orchestrator import SessionOrchestrator, SessionResult
 
 __all__ = [
     "CORE_CONTRACT_VERSION", "ChatMessage", "CompletionRequest", "CompletionResponse",
     "MemoryItem", "SpeechOutputReport", "TurnMode", "WebNavigationRequest",
     "WebNavigationResponse", "CapabilityError", "CapabilityKind", "ErrorCode",
     "SideEffectProfile", "redact_secrets", "ExecutionModel", "ExtensionManifest",
-    "PermissionSet", "ExtensionLifecyclePort", "MemoryPort", "ReasoningPort",
+    "PermissionSet", "ExtensionLifecyclePort", "MemoryCommandPort", "MemoryPort", "ReasoningPort",
     "SpeechInputPort", "SpeechOutputPort", "WebNavigationPort",
     "ExtensionRegistry", "ExtensionState", "HealthReport",
+    "SessionOrchestrator", "SessionResult",
 ]

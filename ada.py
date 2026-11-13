@@ -17,8 +17,41 @@ from rich.align import Align
 import pyfiglet
 
 import memory
-from voice import VoiceEngine
-from browser_navigation import BrowserError, run_task as run_browser_task
+from ada_core import (
+    CapabilityError, CapabilityKind, ErrorCode, ExtensionRegistry, SessionOrchestrator,
+)
+from ada_adapters import (
+    GroqChainReasoningAdapter, OllamaReasoningAdapter, register_default_adapters,
+)
+
+
+def VoiceEngine(*args, **kwargs):
+    """Compatibility facade; importing ADA never requires the voice extension."""
+    from voice import VoiceEngine as engine
+    return engine(*args, **kwargs)
+
+
+def run_browser_task(*args, **kwargs):
+    """Compatibility facade; import the optional browser only on explicit use."""
+    from browser_navigation import run_task
+    return run_task(*args, **kwargs)
+
+
+def _validate_navigation_url(url):
+    """Preserve the existing pure URL guard before optional worker preparation."""
+    try:
+        from browser_navigation import BrowserError, validate_url
+    except ImportError as error:
+        raise CapabilityError(
+            ErrorCode.DEPENDENCY_MISSING, CapabilityKind.NAVIGATION,
+            "The browser extension is not installed.",
+        ) from error
+    try:
+        validate_url(url)
+    except BrowserError as error:
+        raise CapabilityError(
+            ErrorCode.PERMISSION_DENIED, CapabilityKind.NAVIGATION, str(error),
+        ) from error
 
 console = Console()
 
@@ -42,7 +75,8 @@ MODE_EMOJI = {
 
 _CACHED_SYSTEM_PROMPT = None
 
-def get_system_prompt(reload: bool = False, *, query: str = "") -> str:
+def get_system_prompt(reload: bool = False, *, query: str = "",
+                      memory_context: str | None = None) -> str:
     """Cache base instructions only; select bounded memory for the current turn."""
     global _CACHED_SYSTEM_PROMPT
     if _CACHED_SYSTEM_PROMPT is None or reload:
@@ -54,7 +88,8 @@ def get_system_prompt(reload: bool = False, *, query: str = "") -> str:
 
         _CACHED_SYSTEM_PROMPT = base_prompt
 
-    return f"{_CACHED_SYSTEM_PROMPT}\n\n{memory.select_memories_for_prompt(query)}"
+    context = memory.select_memories_for_prompt(query) if memory_context is None else memory_context
+    return f"{_CACHED_SYSTEM_PROMPT}\n\n{context}"
 
 def get_groq_model_chain() -> list[str]:
     configured = os.getenv("ADA_GROQ_MODELS")
@@ -180,7 +215,8 @@ def _parse_memory_array(content: str) -> list:
     return data
 
 
-def execute_memory_command(text: str, client: OpenAI, model: str) -> str | None:
+def execute_memory_command(text: str, client: OpenAI = None, model: str = "", *,
+                           complete=None, store=None) -> str | None:
     """
     Detecta si el usuario usó una palabra clave al INICIO de su frase.
     Si es así, invoca al LLM puramente como parser JSON, ejecuta la DB, 
@@ -188,6 +224,17 @@ def execute_memory_command(text: str, client: OpenAI, model: str) -> str | None:
     Retorna None si no es un comando explícito.
     """
     lowered = text.lower().strip()
+    store = memory if store is None else store
+
+    def extract(prompt, budget):
+        if complete is not None:
+            return complete(prompt, budget)
+        response, _ = create_chat_completion_with_fallback(
+            client, model, [{"role": "user", "content": prompt}],
+            temperature=0.0, max_tokens=max(budget, 300) if _is_reasoning_model(model) else budget,
+            provider="local" if _is_local_client(client, model) else "groq",
+        )
+        return _completion_text(response)
     
     # 1. COMANDO ANOTA (Guarda / Actualiza)
     if re.search(SAVE_TRIGGERS, lowered):
@@ -199,18 +246,13 @@ Texto: "{text}"
 Responde ÚNICAMENTE con el array JSON válido."""
         try:
             with console.status("[dim #fd2636]Procesando orden de guardado...[/dim #fd2636]"):
-                res, _ = create_chat_completion_with_fallback(
-                    client, model, [{"role": "user", "content": prompt}],
-                    temperature=0.0, max_tokens=max(150, 300) if _is_reasoning_model(model) else 150,
-                    provider="local" if _is_local_client(client, model) else "groq",
-                )
-            content = _completion_text(res)
+                content = extract(prompt, 150)
             data = _parse_memory_array(content)
-            saved = memory.save_memories(data)
+            saved = store.save_memories(data)
             for item in saved:
                 console.print(f"  [dim #fd2636]🧠 Anotado: {item['key']} -> {item['value']}[/dim #fd2636]")
             return "Información guardada."
-        except openai.APIError:
+        except (openai.APIError, CapabilityError):
             raise
         except Exception:
             pass
@@ -218,7 +260,7 @@ Responde ÚNICAMENTE con el array JSON válido."""
 
     # 2. COMANDO BORRA (Elimina)
     if re.search(DELETE_TRIGGERS, lowered):
-        memories = memory.get_all_memories()
+        memories = store.get_all_memories()
         if not memories:
             return "Mi memoria ya está vacía."
         
@@ -231,22 +273,17 @@ Texto del usuario: "{text}"
 Responde ÚNICAMENTE con un array JSON de strings con las claves de la lista que coincidan lógicamente. Si no hay coincidencias semánticas, responde []."""
         try:
             with console.status("[dim #fd2636]Procesando orden de borrado...[/dim #fd2636]"):
-                res, _ = create_chat_completion_with_fallback(
-                    client, model, [{"role": "user", "content": prompt}],
-                    temperature=0.0, max_tokens=max(50, 300) if _is_reasoning_model(model) else 50,
-                    provider="local" if _is_local_client(client, model) else "groq",
-                )
-            content = _completion_text(res)
+                content = extract(prompt, 50)
             keys_to_delete = memory.validate_memory_keys(_parse_memory_array(content))
             if any(key not in keys for key in keys_to_delete):
                 raise ValueError("Deletion keys must belong to the offered memories")
-            deleted = memory.delete_memories(keys_to_delete)
+            deleted = store.delete_memories(keys_to_delete)
             if deleted:
                 for k in deleted:
                     console.print(f"  [dim #fd2636]🗑️ Olvidado: {k}[/dim #fd2636]")
                 return "Información eliminada de mi base de datos."
             return "No encontré ese dato en mi memoria para borrarlo."
-        except openai.APIError:
+        except (openai.APIError, CapabilityError):
             raise
         except Exception:
             pass
@@ -304,14 +341,43 @@ def print_ada_response(text: str, mode: str):
 
 # ─── Bucle Principal ──────────────────────────────────────────────────────────
 
-def chat_loop(speech_enabled=False, provider="groq"):
-    memory.init_db()
+def create_session(provider="groq", registry=None):
+    """Composition root; retain facade injection points and perform no provider I/O."""
+    provider = (provider or os.getenv("ADA_CHAT_PROVIDER") or "groq").strip().lower()
+    if provider not in {"groq", "local"}:
+        raise ChatConfigError("Proveedor de conversación no válido. Usa --provider groq o --provider local.")
+    if registry is None:
+        registry = ExtensionRegistry()
+        register_default_adapters(
+            registry, provider=provider, voice_factory=lambda: VoiceEngine(mode="edge"),
+            browser_runner=lambda *args, **kwargs: run_browser_task(*args, **kwargs),
+        )
+        inactive = OllamaReasoningAdapter if provider == "groq" else GroqChainReasoningAdapter
+        registry.register(inactive.manifest, inactive)
+        registry.disable(inactive.manifest.extension_id)
+
+    def prompt_factory(items, *, reload=False):
+        context = memory._format_memories(
+            [(item.category, item.key, item.value) for item in items],
+            "(No hay recuerdos pertinentes disponibles para este turno)",
+        )
+        return get_system_prompt(reload=reload, memory_context=context)
+
+    return SessionOrchestrator(
+        registry, prompt_factory=prompt_factory, classify_input=classify_input_mode,
+        memory_command=lambda text, complete, store: execute_memory_command(
+            text, complete=complete, store=store),
+        navigation_validator=_validate_navigation_url,
+        configured_models={
+            "reasoning.groq": get_groq_model_chain()[0],
+            "reasoning.ollama_local": (os.getenv("ADA_LOCAL_MODEL") or DEFAULT_LOCAL_MODEL).strip(),
+        },
+    )
+
+
+def chat_loop(speech_enabled=False, provider="groq", *, registry=None):
+    session = create_session(provider=provider, registry=registry)
     print_header()
-
-    client, model = get_client(provider)
-    voice_engine = VoiceEngine(mode="edge")
-
-    messages = [{"role": "system", "content": get_system_prompt()}]
 
     while True:
         try:
@@ -322,7 +388,11 @@ def chat_loop(speech_enabled=False, provider="groq"):
             if typed_input:
                 user_input = typed_input
             else:
-                user_input = voice_engine.listen_manual_push()
+                transcription = session.listen()
+                if transcription.kind == "error":
+                    console.print(Text(transcription.text, style="red"))
+                    continue
+                user_input = transcription.text
                 
                 if user_input:
                     # Keep audio failure notices visible when transcription is empty.
@@ -334,79 +404,23 @@ def chat_loop(speech_enabled=False, provider="groq"):
             if not user_input:
                 continue
 
-            if user_input.strip().lower() in {"salir", "exit", "quit"}:
-                farewell = "Hasta luego."
-                print_ada_response(farewell, "casual")
+            result = session.handle_text(user_input)
+            for notice in result.notices:
+                console.print(Text(notice, style="yellow"))
+            if result.kind in {"error", "status"}:
+                console.print(Text(result.text, style="red" if result.kind == "error" else None))
+            elif result.kind == "navigation":
+                console.print(Panel(Text(result.text), title="Navegación local",
+                                    border_style="#fd2636", padding=(0, 1)))
+                console.print(Text(result.url))
+            else:
+                print_ada_response(result.text, result.mode)
                 if speech_enabled:
-                    voice_engine.speak(farewell)
+                    speech = session.speak(result.text)
+                    if speech.kind == "error":
+                        console.print(Text(speech.text, style="red"))
+            if result.kind == "exit":
                 break
-
-            # ── 1. Intercepción de Comandos Explícitos ──
-            navigation = re.fullmatch(r"/navegar(?:\s+(.*))?", user_input, re.IGNORECASE | re.DOTALL)
-            if navigation:
-                try:
-                    arguments = (navigation.group(1) or "").split(maxsplit=1)
-                    if len(arguments) != 2:
-                        raise BrowserError("Usa /navegar <https-url> <tarea de lectura>.")
-                    result = run_browser_task(*arguments)
-                    console.print(Panel(Text(result.text), title="Navegación local",
-                                        border_style="#fd2636", padding=(0, 1)))
-                    console.print(Text(result.url))
-                except BrowserError as error:
-                    console.print(Text(str(error), style="red"))
-                # External results never enter chat history, memory or online speech.
-                continue
-
-            cmd_response = execute_memory_command(user_input, client, model)
-            if cmd_response:
-                if cmd_response.startswith("Hubo un error"):
-                    console.print(Text(format_provider_error(ChatConfigError(cmd_response)), style="red"))
-                    continue
-                # Si el usuario dio un comando, ejecutamos DB, damos la respuesta rápida y cortamos aquí.
-                print_ada_response(cmd_response, "task")
-                if speech_enabled:
-                    voice_engine.speak(cmd_response)
-                
-                # Actualizamos historial y recargamos system prompt para turnos futuros
-                messages.append({"role": "user", "content": user_input})
-                messages.append({"role": "assistant", "content": cmd_response})
-                messages[0] = {"role": "system", "content": get_system_prompt(reload=True)}
-                if len(messages) > 11: messages = [messages[0]] + messages[-10:]
-                
-                continue  # NO invocamos al LLM para charlar. Salto directo al próximo turno.
-
-            # ── 2. Conversación Normal ──
-            turn_messages = [{"role": "system", "content": get_system_prompt(query=user_input)},
-                             *messages[1:], {"role": "user", "content": user_input}]
-            if len(turn_messages) > 11:
-                turn_messages = [turn_messages[0]] + turn_messages[-10:]
-
-            mode_info = classify_input_mode(user_input)
-            mode, temperature, max_tokens, think = mode_info["mode"], mode_info["temperature"], mode_info["max_tokens"], mode_info["think"]
-
-            think_label = "Ada razonando..." if think else "Ada..."
-            with console.status(f"[dim #fd2636]{think_label}[/dim #fd2636]"):
-                response, model = create_chat_completion_with_fallback(
-                    client, model, turn_messages, temperature=temperature, max_tokens=max_tokens,
-                    think=think, provider=provider,
-                )
-            ada_response = _completion_text(response)
-
-            if not ada_response:
-                with console.status("[dim #fd2636]Reintentando...[/dim #fd2636]"):
-                    fallback_response, model = create_chat_completion_with_fallback(
-                        client, model, turn_messages, temperature=temperature, max_tokens=max_tokens * 3,
-                        think=False, provider=provider,
-                    )
-                ada_response = _completion_text(fallback_response)
-
-            if not ada_response:
-                raise ChatConfigError("El proveedor devolvió una respuesta vacía o truncada tras el reintento.")
-
-            print_ada_response(ada_response, mode)
-            messages = [*turn_messages, {"role": "assistant", "content": ada_response}]
-            if speech_enabled:
-                voice_engine.speak(ada_response)
 
         except KeyboardInterrupt:
             console.print("\n[dim #fd2636]Nos vemos.[/dim #fd2636]")
@@ -417,7 +431,8 @@ def chat_loop(speech_enabled=False, provider="groq"):
 
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="ADA: chat por texto con audio opcional.",
-                                     epilog="En el chat: /navegar <https-url> <tarea> usa Browser Use, "
+                                     epilog="En el chat: /estado muestra extensiones y modelo activo. "
+                                            "/navegar <https-url> <tarea> usa Browser Use, "
                                             "Edge y Ollama locales; consulta README para preparar el entorno opcional.")
     parser.add_argument("--speak", action="store_true",
                         help="Activar respuestas habladas (Edge TTS online con respaldo local).")
@@ -427,6 +442,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
 
 if __name__ == "__main__":
+    # Reasoning adapters resolve this facade lazily, including direct CLI execution.
+    sys.modules["ada"] = sys.modules[__name__]
     args = build_argument_parser().parse_args()
     try:
         chat_loop(speech_enabled=args.speak, provider=args.provider)

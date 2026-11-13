@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import re
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -159,10 +160,10 @@ class IsolatedPromptFixture(unittest.TestCase):
         self.addCleanup(database_patch.stop)
         # SQLite's transaction context manager does not close its connection.
         connections = []
-        original_connect = memory.get_db_connection
-
         def tracked_connect():
-            connection = original_connect()
+            # Registry calls own their connections on worker threads. Only this
+            # fixture's final cleanup closes them from the test thread.
+            connection = sqlite3.connect(memory.DB_PATH, check_same_thread=False)
             connections.append(connection)
             return connection
 

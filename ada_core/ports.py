@@ -32,6 +32,20 @@ class MemoryPort(Protocol):
 
 
 @runtime_checkable
+class MemoryCommandPort(MemoryPort, Protocol):
+    """Optional command contract; retain the original single-item MemoryPort.
+
+    Listing is complete and ordered, unlike bounded per-turn recall. Mutations
+    validate the whole batch before writing and commit atomically. Return only
+    committed normalized records or keys actually removed, never intended writes.
+    """
+
+    def list_all(self) -> tuple[MemoryItem, ...]: ...
+    def save_batch(self, items: tuple[MemoryItem, ...]) -> tuple[MemoryItem, ...]: ...
+    def delete_batch(self, keys: tuple[str, ...]) -> tuple[str, ...]: ...
+
+
+@runtime_checkable
 class SpeechInputPort(Protocol):
     def transcribe(self, audio: bytes) -> str: ...
 

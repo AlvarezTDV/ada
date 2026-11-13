@@ -5,6 +5,7 @@ import types
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from ada_core import ExtensionState, HealthReport
 
 ROOT = Path(__file__).resolve().parents[1]
 AUDIO_MODULES = ("faster_whisper", "pyaudio", "numpy", "pygame", "edge_tts", "pyttsx3")
@@ -196,9 +197,11 @@ class OptionalAudioTests(unittest.TestCase):
     def run_chat(self, ada, inputs, speech_enabled=False):
         client = MagicMock()
         client.chat.completions.create.return_value.choices = [
-            types.SimpleNamespace(message=types.SimpleNamespace(content="Respuesta escrita"))
+            types.SimpleNamespace(message=types.SimpleNamespace(content="Respuesta escrita"), finish_reason="stop")
         ]
-        with patch.object(ada.memory, "init_db"), \
+        with patch.dict("sys.modules", {"ada": ada}), \
+             patch("ada_adapters.memory_sqlite.SqliteMemoryAdapter.recall", return_value=()), \
+             patch("ada_adapters.voice_adapters._available", return_value=True), \
              patch.object(ada, "get_client", return_value=(client, "test")), \
              patch.object(ada, "get_system_prompt", return_value="system"), \
              patch.object(ada, "print_header"), \
@@ -226,7 +229,8 @@ class OptionalAudioTests(unittest.TestCase):
         with patch.dict("sys.modules", {"voice": self.voice}):
             ada = load_module("optional_audio_failure_ada", "ada.py")
         self.modules["pyaudio"].PyAudio.side_effect = RuntimeError("no microphone")
-        with patch.dict("sys.modules", {"edge_tts": None, "pyttsx3": None}):
+        with patch.dict("sys.modules", {"edge_tts": None, "pyttsx3": None}), \
+             patch.object(ada, "VoiceEngine", self.voice.VoiceEngine):
             output = self.run_chat(ada, ["", "hola", "salir"], speech_enabled=True)
         output.assert_any_call("Respuesta escrita", "casual")
         output.assert_any_call("Hasta luego.", "casual")
@@ -235,7 +239,7 @@ class OptionalAudioTests(unittest.TestCase):
         with patch.dict("sys.modules", {"voice": self.voice}):
             ada = load_module("optional_audio_memory_ada", "ada.py")
         client = MagicMock()
-        with patch.object(ada.memory, "init_db"), \
+        with patch("ada_adapters.voice_adapters._available", return_value=True), \
              patch.object(ada, "get_client", return_value=(client, "test")), \
              patch.object(ada, "get_system_prompt", return_value="system"), \
              patch.object(ada, "print_header"), \

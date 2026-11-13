@@ -8,6 +8,7 @@ import httpx
 
 import browser_navigation
 import memory
+from ada_core import ExtensionState, HealthReport
 from test_memory_prompt import IsolatedPromptFixture, ada
 
 # The shared voice fixture restores sys.modules after importing ada. Use the
@@ -49,6 +50,8 @@ class GroqChatProviderTests(IsolatedPromptFixture):
         client.chat.completions.create.side_effect = answer
         with patch.object(ada, "get_client", return_value=(client, ada.DEFAULT_MODEL)), \
              patch.object(ada, "VoiceEngine") as voice, \
+             patch("ada_adapters.voice_adapters.EdgeLocalTTSAdapter.probe",
+                   return_value=HealthReport(ExtensionState.READY)), \
              patch.object(ada, "console") as console, \
              patch.object(ada, "print_header"), \
              patch.object(ada, "print_ada_response") as display, \
@@ -79,6 +82,14 @@ class GroqChatProviderTests(IsolatedPromptFixture):
                 self.assertEqual(model, ada.DEFAULT_MODEL)
             with self.assertRaises(ada.ChatConfigError):
                 ada.get_client("unknown")
+
+    def test_mock_speech_fixture_does_not_require_installed_audio_packages(self):
+        with patch("ada_adapters.voice_adapters._available", return_value=False):
+            requests, _, voice, display = self.run_chat(
+                [completion("offline fixture")], ["hola"], speech_enabled=True)
+        self.assertEqual(len(requests), 1)
+        display.assert_called_once_with("offline fixture", "casual")
+        voice.speak.assert_called_once_with("offline fixture")
 
     def test_cli_provider_local_selects_ollama_without_requiring_groq_key(self):
         with patch.object(ada, "OpenAI") as factory:

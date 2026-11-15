@@ -39,9 +39,16 @@ CHAIN = "llama-3.3-70b-versatile,openai/gpt-oss-20b,openai/gpt-oss-120b"
 class AdapterConformanceTests(unittest.TestCase):
     def setUp(self):
         # Bind provider imports to the shared Ada fixture during HTTP-double tests.
-        modules = patch.dict("sys.modules", {"ada": ada})
-        modules.start()
-        self.addCleanup(modules.stop)
+        existed, previous = "ada" in sys.modules, sys.modules.get("ada")
+        sys.modules["ada"] = ada
+
+        def restore_ada():
+            if existed:
+                sys.modules["ada"] = previous
+            else:
+                sys.modules.pop("ada", None)
+
+        self.addCleanup(restore_ada)
         sockets = patch("socket.socket.connect", side_effect=AssertionError("Network is forbidden"))
         sockets.start()
         self.addCleanup(sockets.stop)
@@ -81,6 +88,17 @@ class AdapterConformanceTests(unittest.TestCase):
         )
         self.addCleanup(client.close)
         return adapter_type(client=client), calls
+
+    def test_fixture_restores_only_ada_without_evicting_lazy_modules(self):
+        from types import ModuleType
+        name = "_ada_conformance_identity_probe"
+        marker = ModuleType(name)
+        sys.modules[name] = marker
+        try:
+            self.doCleanups()
+            self.assertIs(sys.modules.get(name), marker)
+        finally:
+            sys.modules.pop(name, None)
 
     def test_groq_and_ollama_adapters_satisfy_reasoning_port_contract_interchangeably(self):
         for adapter_type, extension_id in (
@@ -331,17 +349,26 @@ class VoiceAndBrowserAdapterConformanceTests(unittest.TestCase):
             self.assertNotEqual(states[CapabilityKind.TTS], ExtensionState.UNAVAILABLE_DEPENDENCY)
             available.update(stt.manifest.optional_packages)
             registry.enable(stt.manifest.extension_id)
-            self.assertEqual(registry.execute(CapabilityKind.STT, lambda a: a.transcribe(b"")), "Recognized text")
-            engine.listen_manual_push.assert_called_once_with()
+            with patch.object(WhisperPushToTalkAdapter, "start_capture"), \
+                 patch.object(WhisperPushToTalkAdapter, "stop_capture"), \
+                 patch.object(WhisperPushToTalkAdapter, "poll_capture",
+                              side_effect=[("recording", ""), ("complete", "Recognized text")]), \
+                 patch("ada_adapters.voice_adapters.TerminalInput.wait_for_stop"):
+                self.assertEqual(registry.execute(CapabilityKind.STT, lambda a: a.transcribe(b"")),
+                                 "Recognized text")
+            engine.listen_manual_push.assert_not_called()
             engine.speak.return_value = SimpleNamespace(success=False, engine="local", completed_chunks=0,
                                                         stage="playback", error=RuntimeError("Audio failed"))
             with self.assertRaises(CapabilityError):
                 registry.execute(CapabilityKind.TTS, lambda a: a.speak("Hello"))
-            self.assertEqual(registry.execute(CapabilityKind.STT, lambda a: a.transcribe(b"")), "Recognized text")
-            engine.listen_manual_push.return_value = ""
-            with self.assertRaises(CapabilityError) as caught:
-                stt.transcribe(b"")
-            self.assertEqual(caught.exception.code, ErrorCode.EMPTY_RESPONSE)
+            with patch.object(WhisperPushToTalkAdapter, "start_capture"), \
+                 patch.object(WhisperPushToTalkAdapter, "stop_capture"), \
+                 patch.object(WhisperPushToTalkAdapter, "poll_capture",
+                              side_effect=[("recording", ""), ("complete", "")]), \
+                 patch("ada_adapters.voice_adapters.TerminalInput.wait_for_stop"):
+                self.assertEqual(registry.execute(CapabilityKind.STT, lambda a: a.transcribe(b"")), "")
+            states = {d.capability: d.state for d in registry.diagnostics()}
+            self.assertEqual(states[CapabilityKind.STT], ExtensionState.READY)
 
 
 class SqliteAdapterConformanceTests(unittest.TestCase):

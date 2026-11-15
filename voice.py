@@ -28,16 +28,6 @@ class VoiceEngine:
         self.mode = mode
         self.edge_voice = "es-MX-DaliaNeural"
         
-        self.whisper_model = None
-
-    def _get_whisper_model(self):
-        if self.whisper_model is None:
-            from faster_whisper import WhisperModel
-
-            console.print("[dim]Cargando reconocimiento de voz por primera vez...[/dim]")
-            self.whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
-        return self.whisper_model
-
     @staticmethod
     def clean_for_tts(text: str) -> str:
         """Strip markdown symbols so TTS reads clean natural text."""
@@ -199,57 +189,14 @@ class VoiceEngine:
             engine.stop()
 
     def listen_manual_push(self) -> str:
-        """Record until Enter, without leaving a background console reader."""
-        p = None
-        stream = None
-        frames = []
-        capture_error = None
+        """Compatibility facade: microphone/native inference stay in a child."""
+        from ada_adapters.voice_adapters import WhisperPushToTalkAdapter
+
+        adapter = WhisperPushToTalkAdapter()
         try:
-            import pyaudio
-            import numpy as np
-
-            model = self._get_whisper_model()
-            p = pyaudio.PyAudio()
-
-            def record_chunk(data, frame_count, time_info, status):
-                nonlocal capture_error
-                if status:
-                    capture_error = RuntimeError(f"Fallo de captura de audio ({status})")
-                    return None, pyaudio.paAbort
-                frames.append(data)
-                return None, pyaudio.paContinue
-
-            stream = p.open(format=pyaudio.paInt16, channels=1, rate=16000,
-                            input=True, frames_per_buffer=1024, stream_callback=record_chunk)
-            input("Grabando... Presiona ENTER para detener y volver al chat.\n")
-            if capture_error:
-                raise capture_error
-        except Exception as e:
-            console.print(f"[red]Entrada de voz no disponible; puedes continuar por texto: {e}[/red]")
-            return ""
+            return adapter.transcribe(b"")
         finally:
-            if stream is not None:
-                for close in (stream.stop_stream, stream.close):
-                    try:
-                        close()
-                    except Exception as e:
-                        console.print(f"[red]Error al cerrar micrófono; continúa por texto: {e}[/red]")
-            if p is not None:
-                try:
-                    p.terminate()
-                except Exception as e:
-                    console.print(f"[red]Error al liberar audio; continúa por texto: {e}[/red]")
-
-        if not frames:
-            return ""
-        try:
-            audio_np = np.frombuffer(b''.join(frames), dtype=np.int16).astype(np.float32) / 32768.0
-            segments, info = model.transcribe(audio_np, language="es")
-            text = " ".join([segment.text for segment in segments]).strip()
-            return text
-        except Exception as e:
-            console.print(f"[red]Error procesando transcripción; continúa por texto: {e}[/red]")
-            return ""
+            adapter.shutdown()
 
 if __name__ == "__main__":
     v = VoiceEngine(mode="edge")

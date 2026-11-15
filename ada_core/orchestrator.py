@@ -2,11 +2,11 @@
 
 from dataclasses import dataclass, replace
 import re
-from threading import Event
+import time
 
 from .domain import ChatMessage, CompletionRequest, MemoryItem, TurnMode, WebNavigationRequest
 from .errors import CapabilityError, CapabilityKind, ErrorCode, redact_secrets
-from .ports import MemoryCommandPort
+from .ports import InteractiveSpeechInputPort, MemoryCommandPort
 from .registry import ExtensionState
 
 
@@ -69,7 +69,8 @@ class SessionOrchestrator:
         self.messages = [ChatMessage("system", self._prompt(()))]
         self._reasoning_failure = None
         self._reload_prompt = False
-        self._timed_out_recording = False
+        self._stt_failure = None
+        self._stt_port = None
 
     def _complete(self, request):
         # A new user turn is an explicit retry, never a replay of a timed-out
@@ -158,36 +159,57 @@ class SessionOrchestrator:
         lines.append("READY indica disponibilidad local; la red/cuota se verifica al enviar un turno.")
         return SessionResult(redact_secrets("\n".join(lines)), kind="status")
 
-    def listen(self):
-        started, finished, captured = Event(), Event(), []
+    def listen(self, wait_for_stop=None):
+        return self.listen_interactive(wait_for_stop)
 
-        def transcribe(port):
-            started.set()
-            try:
-                text = port.transcribe(b"")
-                captured.append(text)
-                return text
-            finally:
-                finished.set()
+    def listen_interactive(self, wait_for_stop=None):
+        """Run short registry operations, never a user-duration registry thread."""
+        def invoke(operation):
+            return self.registry.execute(CapabilityKind.STT, operation)
 
+        port = None
         try:
-            if self._timed_out_recording:
-                for row in self.registry.diagnostics():
-                    if row.capability == CapabilityKind.STT and row.state == ExtensionState.FAILED:
-                        self.registry.enable(row.extension_id)
-                self._timed_out_recording = False
-            text = self.registry.execute(CapabilityKind.STT, transcribe)
-            return SessionResult(text, kind="input")
+            if self._stt_failure:
+                self.registry.enable(self._stt_failure)
+                self._stt_failure = None
+            port = invoke(lambda adapter: adapter)
+            self._stt_port = port
+            if not isinstance(port, InteractiveSpeechInputPort):
+                # Compatibility for third-party SpeechInputPort implementations.
+                return SessionResult(invoke(lambda adapter: adapter.transcribe(b"")), kind="input")
+            if wait_for_stop is None:
+                raise CapabilityError(ErrorCode.EXECUTION_FAILED, CapabilityKind.STT,
+                                      "Interactive speech requires a terminal input controller.")
+            invoke(lambda adapter: adapter.start_capture())
+
+            def poll():
+                return invoke(lambda adapter: adapter.poll_capture())
+
+            while poll()[0] != "recording":
+                time.sleep(0.01)
+            wait_for_stop(poll)
+            invoke(lambda adapter: adapter.stop_capture())
+            while True:
+                phase, text = poll()
+                if phase == "complete":
+                    return SessionResult(text.strip(), kind="input")
+                time.sleep(0.01)
         except CapabilityError as error:
-            if error.code == ErrorCode.TIMEOUT and started.is_set():
-                # Bounded waiting cannot revoke an interactive stdin reader.
-                # Preserve the original ENTER/interrupt lifecycle before the
-                # terminal may ask another question. Never repeat recording.
-                self._timed_out_recording = True
-                finished.wait()
-                if captured:
-                    return SessionResult(captured[0], kind="input")
+            self._stt_failure = error.extension_id
             return self._error(error)
+        except BaseException:
+            if isinstance(port, InteractiveSpeechInputPort):
+                try:
+                    invoke(lambda adapter: adapter.cancel_capture())
+                except CapabilityError:
+                    # Cancellation diagnostics belong to STT; preserve the
+                    # original interrupt/EOF so the outer session still exits.
+                    pass
+            raise
+
+    def shutdown(self):
+        if isinstance(self._stt_port, InteractiveSpeechInputPort):
+            self._stt_port.shutdown()
 
     def speak(self, text):
         try:

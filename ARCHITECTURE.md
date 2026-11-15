@@ -29,7 +29,7 @@ boundary, **not a sandbox or an in-process thread terminator**.
 |---|---|---|
 | Reasoning | `reasoning_adapters.py` / existing `ada.py` provider helpers | Groq quota chain, or explicitly selected local Ollama; no automatic cross-provider fallback. |
 | Memory | `memory_sqlite.py` / `memory.py` | Relevant bounded recall; atomic save/delete batches and actual committed results. |
-| STT / TTS | `voice_adapters.py` / `voice.py` | Separate lazy engines and failure states; text remains usable if either is absent or fails. |
+| STT / TTS | `voice_adapters.py` / `stt_worker.py`, `voice.py` | Independent lazy lifetimes: supervised microphone/Whisper subprocess; separate speech-output engine. |
 | Navigation | `browser_navigation_adapter.py` / isolated browser worker | Explicit URL/task only; output never enters memory, chat history, or TTS. |
 
 ### Memory and facade compatibility
@@ -47,8 +47,9 @@ The public `get_client`, `get_system_prompt`, `execute_memory_command`,
 `run_browser_task`, `VoiceEngine`, and `chat_loop` facades remain available.
 Command extraction and persistence are injected through registry-backed
 callbacks; pure formatting/validation reuse the existing helpers. Browser and
-voice runner references are resolved from the facade at use time, preserving
-test injection. Direct CLI execution binds the same facade module used by the
+speech-output runner references are resolved from the facade at use time,
+preserving test injection. STT tests inject a worker command rather than a
+parent-side voice engine. Direct CLI execution binds the same facade module used by the
 reasoning adapters.
 
 ### Diagnostics and fault isolation
@@ -73,12 +74,14 @@ failure never invokes a memory mutation. Empty/truncated chat responses get one
 retry; writes/deletes never do. A new user turn explicitly retries reasoning,
 but `enable()` refuses recovery while a timed-out invocation is still running.
 Registry deadlines bound waiting, not SDK thread termination.
-Interactive STT must additionally release its terminal reader before the next
-prompt: after a registry timeout, the orchestrator waits for that same capture
-to finish and can accept its completed transcription without recording again.
-The timed-out extension remains marked failed until an explicit subsequent
-microphone request can safely re-enable it. Interrupting exits the session
-rather than starting a second competing stdin reader.
+Interactive STT uses `InteractiveSpeechInputPort` alongside the unchanged
+`SpeechInputPort.transcribe(audio: bytes) -> str`. The orchestrator routes
+start/poll/stop through short `registry.execute` calls; user-duration waiting is
+never inside a registry invocation. The host's single `TerminalInput` polls
+worker health and terminal readiness on the calling thread, without abandoned
+stdin-reader threads. A worker failure returns immediately to written chat.
+Subsequent microphone requests explicitly retry the quiescent registry entry;
+the adapter refuses a replacement when termination remains unconfirmed.
 
 Tests injecting `ada.run_browser_task` also double the browser adapter's
 readiness probe (or supply a registry with their own navigation extension).
@@ -94,8 +97,8 @@ using doubles and temporary databases. It makes no live provider requests.
 Chat and voice-output selection are independent. `get_client()` defaults to Groq
 using `GROQ_API_KEY` and its OpenAI-compatible endpoint; it does not choose local
 chat based on `OPENAI_API_KEY`. `chat_loop()` constructs the session registry;
-STT and TTS adapters create their independent `VoiceEngine(mode="edge")` instances
-only when the corresponding feature is requested.
+STT starts its persistent worker only when requested; TTS creates its independent
+`VoiceEngine(mode="edge")` only when speech output is requested.
 Speech output remains disabled unless `--speak` is set; audio failures leave text
 chat available.
 
@@ -118,7 +121,7 @@ No Groq key is required in local mode.
 
 | Ruta | Datos y destino |
 |---|---|
-| Transcripción (`voice.py`, `listen_manual_push`) | Whisper recibe el audio del micrófono como una matriz NumPy en memoria. No se envía la grabación a un servicio de transcripción. El texto resultante se procesa como una entrada escrita. |
+| Transcripción (`stt_worker.py`, `MicrophoneCapture`) | Whisper recibe el audio del micrófono como una matriz NumPy en la memoria del proceso aislado. No se envía la grabación a un servicio de transcripción. El texto resultante se procesa como una entrada escrita. |
 | Conversación (`ada.py`, `get_system_prompt` y `chat_loop`) | Groq by default, or Ollama with `--provider local`, receives the current message, recent history and system prompt. `memory.select_memories_for_prompt()` selects records locally; default cloud chat sends those selected values to Groq. Quota fallback resends the context to another Groq model. |
 | Guardado (`ada.py`, `execute_memory_command`) | El proveedor seleccionado recibe la orden y su contenido para extraer los datos. SQLite guarda el resultado localmente. La solicitud de extracción no incluye el conjunto de recuerdos existentes. |
 | Borrado (`ada.py`, `execute_memory_command`) | Si hay recuerdos, el proveedor seleccionado recibe la orden y la lista de claves existentes para identificar cuáles borrar. Esta solicitud no incluye sus valores. SQLite ejecuta el borrado localmente; si no hay recuerdos, no se solicita selección al modelo. |
@@ -196,11 +199,13 @@ details](README.md#measured-groq-evaluation-and-latency-2026-11-09).
 
 ## Ciclo de Vida del Comando de Voz (Push-To-Talk)
 
-1. El usuario presiona `ENTER` en un prompt vacío. Solo entonces se importan las dependencias de entrada y se carga Whisper si todavía no está disponible. La primera carga puede requerir descargar el modelo.
-2. Se abre el micrófono (`PyAudio`). Un callback recibe los fragmentos de audio, mientras el hilo principal espera el siguiente `ENTER` mediante `input()`.
-3. Al presionar `ENTER` nuevamente, se detiene y cierra el flujo y se libera PyAudio. No queda un lector de teclado en segundo plano que pueda consumir el siguiente mensaje escrito.
-4. Los bytes PCM se normalizan a Float32 con NumPy y se transcriben en memoria mediante el modelo reutilizable, sin archivos de grabación.
-5. Si falla la carga, apertura o transcripción, se informa y se vuelve al chat escrito. Un fallo durante la captura requiere finalizar el intento con `ENTER`. La respuesta escrita se muestra antes de intentar la síntesis opcional.
+1. Empty `ENTER` requests STT through the registry. The supervisor assigns a fresh `job_id`, starts `stt_worker.py` lazily and assigns the process to a kill-on-close Windows Job Object before sending its first command (POSIX: a new process session).
+2. Worker stdin/stdout carry bounded JSON lines only: `start`, `initializing`, `recording`, `stop`, `transcribing`, `result`, structured `error`, and `shutdown`. Every message carries its job identity; stale identities, malformed messages and unexpected EOF fail closed. Third-party stdout is redirected away from IPC.
+3. The worker imports PyAudio/NumPy/Whisper, caches `WhisperModel("base", device="cpu", compute_type="int8")`, opens the microphone, and collects PCM through its callback. The parent owns all terminal reads and monitors worker health without a blocking recording `input()` or background stdin thread.
+4. Initialization has a 30-second deadline. Active user recording has no deadline. The second `ENTER` starts a separate 5-second stop/cleanup deadline; `transcribing` starts a 30-second inference deadline. Adapter constructors allow shorter deadlines in deterministic tests.
+5. Cleanup and inference stay in the worker. PCM is normalized to Float32 in RAM, with no recording files. Successful silence is an empty input result, not `EMPTY_RESPONSE`; it neither invokes reasoning nor degrades STT.
+6. Device, cleanup, dependency, IPC and transcription failures update STT diagnostics independently of chat/memory. Cancellation invalidates the job before bounded process-tree termination and reaping. A confirmed exit permits an explicit later microphone retry; an unconfirmed exit permanently quarantines that adapter's microphone use, with an explicit `FAILED` reason. It does not prevent written chat or claim OS-driver repair.
+7. Successful captures retain the process/model across turns. Exit/EOF/`Ctrl+C` closes the owned worker tree; a failed or interrupted capture never enters history or mutates SQLite.
 
 La carga de Whisper se traslada al primer uso del micrófono. En Windows con Python 3.13.7, la mediana desde el lanzamiento del proceso hasta el primer prompt escrito pasó de **3,86 s a 1,94 s** frente al commit `353fa4b`: **1,92 s menos (49,8 %)**. Se descartó un calentamiento y se midieron cinco procesos nuevos por versión, alternando el orden, con dependencias y modelo en caché y descargas desactivadas. No mide el primer uso del micrófono, una caché fría ni el tiempo de respuesta; no garantiza el mismo resultado en otros equipos. Las tres evaluaciones locales de memoria con `qwen2.5:3b` también pasaron usando datos sintéticos; véanse los controles y las limitaciones en [README.md](README.md#measured-text-startup).
 
@@ -222,9 +227,9 @@ Para evitar regresiones, se documentan rigurosamente los enfoques arquitectónic
 - ❌ **Descartado (Tool Calling Nativo):** Obligaba a hacer dos llamadas completas al LLM por turno. Modelos pequeños (como el 3B) alucinaban los formatos JSON o entraban en bucles. Esto duplicaba la latencia percibida.
 - ✅ **Decisión (Actual):** Enrutamiento híbrido. Expresiones regulares interceptan intenciones duras al inicio de la frase (`"Anota..."`, `"Borra..."`). Si hay match, el LLM actúa puramente como un parser JSON veloz. La latencia general se reduce a la mitad.
 
-### 2. Captura de Eventos de Teclado (Push-To-Talk)
-- ❌ **Descartado (`msvcrt.kbhit`):** Librería nativa de C exclusiva de Windows. Rompía el programa instantáneamente con un `ImportError` en entornos Linux o macOS.
-- ✅ **Decisión (Actual):** `input()` permanece en el hilo principal y PyAudio captura mediante callback. Evita lectores de teclado abandonados tras errores y conserva el control con `ENTER`, sin `msvcrt` ni el módulo `keyboard`.
+### 2. Terminal ownership (push-to-talk)
+- **Rejected:** an indefinitely blocking recording `input()` or an abandoned background input thread; either prevents safe return to text after worker failure.
+- **Current:** one parent-owned controller. Windows console polling imports `msvcrt` only on Windows; POSIX uses `select`, and redirected Windows pipes use readiness inspection. Injected `builtins.input` remains supported for tests. Audio capture never reads the terminal.
 
 ### 3. I/O de Archivos de Audio para Whisper
 - ❌ **Descartado (Archivos Temporales `.wav`):** Python 3.13 modificó el manejo de descriptores, y Windows bloquea agresivamente archivos abiertos (`NamedTemporaryFile`). Lanzaba `PermissionError` o `metadata_errors` cuando Whisper intentaba acceder a un archivo que Python aún tenía "tomado". Además, reducía la vida útil del disco (SSD) por I/O constante.

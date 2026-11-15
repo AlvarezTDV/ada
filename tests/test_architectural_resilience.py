@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import sys
 import threading
+import time
 from unittest.mock import Mock, patch
 
 import httpx
@@ -245,21 +246,13 @@ class ArchitecturalResilienceTests(IsolatedPromptFixture):
         self.assertEqual(len(session.messages), 5)
 
     def test_recording_finishes_before_next_prompt_even_after_registry_deadline(self):
-        release, finished = threading.Event(), threading.Event()
         prompts = []
-        voice = Mock()
-
-        def record():
-            release.wait(2)
-            finished.set()
-            return "hola"
-
-        voice.listen_manual_push.side_effect = record
+        from ada_adapters.voice_adapters import WhisperPushToTalkAdapter
         original = ExtensionRegistry.execute
 
         def bounded(registry, capability, operation, **kwargs):
             if capability == CapabilityKind.STT:
-                kwargs["timeout_s"] = 0.01
+                kwargs["timeout_s"] = 0.1
             return original(registry, capability, operation, **kwargs)
 
         count = 0
@@ -269,24 +262,137 @@ class ArchitecturalResilienceTests(IsolatedPromptFixture):
             count += 1
             if count == 1:
                 return ""
-            prompts.append(finished.is_set())
+            if count == 2:
+                # Longer than a short registry operation deadline: user waiting
+                # must not be inside registry.execute's daemon call.
+                time.sleep(0.15)
+                return ""
+            prompts.append(count)
             return "salir"
 
-        timer = threading.Timer(0.1, release.set)
-        timer.start()
-        try:
-            with patch.object(ada, "VoiceEngine", return_value=voice), \
-                 patch("ada_adapters.voice_adapters._available", return_value=True), \
-                 patch.object(ExtensionRegistry, "execute", bounded), \
-                 patch("builtins.input", side_effect=typed), patch.object(ada, "print_header"):
-                ada.chat_loop()
-            self.assertEqual(prompts, [True])
-            self.client.chat.completions.create.assert_called_once()
-            voice.listen_manual_push.assert_called_once()
-        finally:
-            release.set()
-            timer.join()
-            finished.wait(2)
+        with patch.object(WhisperPushToTalkAdapter, "start_capture"), \
+             patch.object(WhisperPushToTalkAdapter, "stop_capture"), \
+             patch.object(WhisperPushToTalkAdapter, "poll_capture",
+                          side_effect=[("recording", ""), ("recording", ""),
+                                       ("recording", ""), ("complete", "hola")]), \
+             patch("ada_adapters.voice_adapters._available", return_value=True), \
+             patch.object(ExtensionRegistry, "execute", bounded), \
+             patch("builtins.input", side_effect=typed), patch.object(ada, "print_header"):
+            ada.chat_loop()
+        self.assertEqual(prompts, [3])
+        self.client.chat.completions.create.assert_called_once()
+
+    def stt_session(self, mode):
+        from ada_adapters.voice_adapters import WhisperPushToTalkAdapter
+        import test_stt_worker
+        adapter = WhisperPushToTalkAdapter(
+            worker_command=[sys.executable, "-B", str(Path(test_stt_worker.__file__)), "--fake", mode],
+            init_timeout=0.4 if mode == "init_hang" else 2,
+            stop_timeout=0.3, transcription_timeout=0.3)
+        registry = self.minimal_registry()
+        registry.register(adapter.manifest, lambda: adapter,
+                          probe=lambda: HealthReport(ExtensionState.READY))
+        session = self.session(registry)
+        self.addCleanup(session.shutdown)
+        return session, adapter
+
+    def test_failed_rejected_and_silent_capture_preserve_exact_history_and_sqlite(self):
+        from ada_core import CapabilityError
+        from ada_adapters.voice_adapters import TerminalInput
+        for mode in ("silence", "device", "init_hang", "recording_error"):
+            with self.subTest(mode=mode):
+                session, adapter = self.stt_session(mode)
+                before, database = copy.deepcopy(session.messages), self.snapshot()
+
+                def stop(tick):
+                    if mode == "recording_error":
+                        while True:
+                            tick()
+                            time.sleep(0.01)
+                    else:
+                        with patch("builtins.input", return_value=""):
+                            TerminalInput().wait_for_stop(tick)
+
+                self.client.chat.completions.create.reset_mock()
+                result = session.listen(stop)
+                self.assertEqual(result.kind, "input" if mode == "silence" else "error")
+                if mode == "silence":
+                    self.assertEqual(result.text, "")
+                self.assertEqual(session.messages, before)
+                self.assertEqual(self.snapshot(), database)
+                self.client.chat.completions.create.assert_not_called()
+                states = session.status().text
+                self.assertIn("READY" if mode == "silence" else "FAILED", states)
+                self.assertNotIn("DEGRADED", states)
+                self.assertNotIn("tras el reintento", result.text)
+                with self.assertRaises(CapabilityError):
+                    adapter.transcribe(b"rejected audio")
+                self.assertEqual(session.messages, before)
+                self.assertEqual(self.snapshot(), database)
+                self.assertEqual(session.handle_text("mensaje escrito").kind, "chat")
+                self.client.chat.completions.create.assert_called_once()
+                for exit_word in ("salir", "exit", "quit"):
+                    self.assertEqual(session.handle_text(exit_word).kind, "exit")
+                session.shutdown()
+
+    def test_chat_loop_failure_then_written_turn_status_and_exit_are_consumed_once(self):
+        for exit_word in ("salir", "exit", "quit"):
+            with self.subTest(exit_word=exit_word):
+                session, adapter = self.stt_session("init_hang")
+                self.client.chat.completions.create.reset_mock()
+                with patch.object(ada, "create_session", return_value=session), \
+                     patch.object(ada, "print_header"), \
+                     patch("builtins.input", side_effect=["", "written once", "/estado", exit_word]) as keyboard:
+                    ada.chat_loop()
+                self.assertEqual(keyboard.call_count, 4)
+                self.client.chat.completions.create.assert_called_once()
+                self.assertEqual([m.content for m in session.messages if m.role == "user"],
+                                 ["written once"])
+                self.assertIsNone(adapter.process)
+
+    def test_explicit_microphone_retry_after_timeout_recovers_without_registry_race(self):
+        from ada_adapters.voice_adapters import TerminalInput
+        session, adapter = self.stt_session("init_hang")
+        self.assertEqual(session.listen(lambda tick: None).kind, "error")
+        self.assertIsNone(adapter.process)
+        adapter.worker_command[-1] = "normal"
+        adapter.init_timeout = 2
+        for expected in ("hola 1", "hola 2"):
+            with patch("builtins.input", return_value=""):
+                result = session.listen(TerminalInput().wait_for_stop)
+            self.assertEqual((result.kind, result.text), ("input", expected))
+            self.assertIn("READY", session.status().text)
+
+    def test_unconfirmed_exit_is_failed_in_status_but_text_and_exit_remain_usable(self):
+        import subprocess
+        session, adapter = self.stt_session("normal")
+
+        def quarantine(tick):
+            process = adapter.process
+            adapter._deadline = 0
+            with patch.object(process, "poll", return_value=None), \
+                 patch.object(process, "wait", side_effect=subprocess.TimeoutExpired("fake", 0)):
+                tick()
+
+        result = session.listen(quarantine)
+        self.assertEqual(result.kind, "error")
+        status = session.status().text
+        self.assertIn("FAILED", status)
+        self.assertIn("quarantined", status)
+        with patch("subprocess.Popen") as launch:
+            self.assertEqual(session.listen(lambda tick: None).kind, "error")
+            launch.assert_not_called()
+        self.assertEqual(session.handle_text("written").kind, "chat")
+        self.assertEqual(session.handle_text("exit").kind, "exit")
+
+    def test_ctrl_c_during_recording_exits_and_reaps_worker(self):
+        session, adapter = self.stt_session("normal")
+        with patch.object(ada, "create_session", return_value=session), \
+             patch.object(ada, "print_header"), \
+             patch("builtins.input", side_effect=["", KeyboardInterrupt]):
+            ada.chat_loop()
+        self.assertIsNone(adapter.process)
+        self.client.chat.completions.create.assert_not_called()
 
     def test_injected_browser_runner_and_readiness_are_independent_doubles(self):
         result = Mock(text="page text", url="https://example.com")

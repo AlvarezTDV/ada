@@ -107,7 +107,7 @@ Run `python ada.py --help` for the available startup options. Audio dependencies
 - **Text:** Type next to the `🔴 > ` prompt and press `ENTER`.
 - **Diagnostics:** Type `/estado` to inspect registered extensions, their enabled/compatible/available status, failure reasons, and the last confirmed model.
 - **Exit:** Type `salir`, `exit`, or `quit`; these commands and `/estado` work without a reasoning provider.
-- **Microphone:** Leave the input empty and press `ENTER`. On first use, ADA loads Whisper (`base`, CPU/int8); the model may need downloading if it is not cached. When "Grabando..." ("Recording...") appears, speak, then **press ENTER again** to stop recording. The transcription is submitted automatically. Later microphone uses reuse the loaded model.
+- **Microphone:** Leave the input empty and press `ENTER`. A supervised local worker loads Whisper (`base`, CPU/int8); the model may need downloading if it is not cached. When "Grabando..." ("Recording...") appears, speak, then **press ENTER again** to stop recording. The transcription is submitted automatically. Later successful microphone uses reuse the same worker/model. Silence returns to the prompt without reasoning or marking STT unhealthy.
 - **Spoken responses:** Disabled by default; opt in with `--speak`. Playback initializes on the first response, separately from Whisper. Edge TTS falls back to local synthesis if it fails; if both fail, the written response remains available.
 
 ### Extensions and limited mode
@@ -138,10 +138,21 @@ or deletes memory. You can inspect `/estado`, exit, or send a new turn to retry.
 Empty/truncated chat output gets one bounded retry; memory mutations are never
 automatically repeated. Registry timeouts bound waiting, not termination of
 in-process extension code; a still-running extension stays quarantined.
-Interactive microphone capture is the exception to returning after the registry
-deadline: ADA waits for that capture to release terminal input (finish with
-`ENTER`, or interrupt the session) before accepting another prompt. A completed
-transcription can still be used; recording is never automatically repeated.
+Interactive microphone input instead uses short registry operations and a
+supervised subprocess. Startup/model loading is bounded to 30 seconds, stop/audio
+cleanup to 5 seconds, and transcription to 30 seconds. **Active recording has no
+30-second deadline**: the second `ENTER` stops it. The parent alone reads the
+terminal, polling worker health while waiting for that key; a worker failure
+does not require another `ENTER` before text chat resumes.
+
+On a timeout or failure, ADA stops and reaps the worker (bounded shutdown),
+reports the limitation, and leaves history/SQLite unchanged. A new empty
+`ENTER` explicitly retries microphone input only after the previous process is
+confirmed dead. If termination cannot be confirmed, `/estado` shows `FAILED`
+with a quarantine reason and text chat, diagnostics and exit remain available.
+This isolation cannot repair a malfunctioning OS audio driver. `Ctrl+C` exits
+the session and closes the owned worker/process tree. No recording files are
+created; PCM stays in worker memory.
 
 ### Optional local browser automation
 

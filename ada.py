@@ -376,19 +376,32 @@ def create_session(provider="groq", registry=None):
 
 
 def chat_loop(speech_enabled=False, provider="groq", *, registry=None):
+    from ada_adapters.voice_adapters import TerminalInput
+
     session = create_session(provider=provider, registry=registry)
+    keyboard = TerminalInput()
+    try:
+        _chat_session(session, keyboard, speech_enabled)
+    finally:
+        try:
+            session.shutdown()
+        except CapabilityError as error:
+            console.print(Text(error.user_message, style="red"))
+
+
+def _chat_session(session, keyboard, speech_enabled):
     print_header()
 
     while True:
         try:
             user_input = ""
             console.print("[bold #fd2636]🔴[/bold #fd2636] ", end="")
-            typed_input = input("> ").strip()
+            typed_input = keyboard.read_line("> ").strip()
 
             if typed_input:
                 user_input = typed_input
             else:
-                transcription = session.listen()
+                transcription = session.listen_interactive(keyboard.wait_for_stop)
                 if transcription.kind == "error":
                     console.print(Text(transcription.text, style="red"))
                     continue
@@ -424,6 +437,8 @@ def chat_loop(speech_enabled=False, provider="groq", *, registry=None):
 
         except KeyboardInterrupt:
             console.print("\n[dim #fd2636]Nos vemos.[/dim #fd2636]")
+            break
+        except EOFError:
             break
         except Exception as e:
             console.print(Text(f"\n❌ {format_provider_error(e)}\n", style="red"))

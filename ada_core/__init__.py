@@ -9,7 +9,7 @@ from .domain import (
 from .errors import CapabilityError, CapabilityKind, ErrorCode, SideEffectProfile, redact_secrets
 from .manifest import ExecutionModel, ExtensionManifest, PermissionSet
 from .ports import (
-    ExtensionLifecyclePort, MemoryCommandPort, MemoryPort, ReasoningPort, SpeechInputPort,
+    ExtensionLifecyclePort, InteractiveSpeechInputPort, MemoryCommandPort, MemoryPort, ReasoningPort, SpeechInputPort,
     SpeechOutputPort, WebNavigationPort,
 )
 from .registry import ExtensionRegistry, ExtensionState, HealthReport
@@ -21,7 +21,7 @@ __all__ = [
     "WebNavigationResponse", "CapabilityError", "CapabilityKind", "ErrorCode",
     "SideEffectProfile", "redact_secrets", "ExecutionModel", "ExtensionManifest",
     "PermissionSet", "ExtensionLifecyclePort", "MemoryCommandPort", "MemoryPort", "ReasoningPort",
-    "SpeechInputPort", "SpeechOutputPort", "WebNavigationPort",
+    "SpeechInputPort", "InteractiveSpeechInputPort", "SpeechOutputPort", "WebNavigationPort",
     "ExtensionRegistry", "ExtensionState", "HealthReport",
     "SessionOrchestrator", "SessionResult",
 ]

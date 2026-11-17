@@ -80,8 +80,8 @@ import unittest
 from unittest.mock import patch
 
 
-def wait_phase(adapter, target):
-    deadline = time.monotonic() + 4
+def wait_phase(adapter, target, timeout=4):
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         phase, text = adapter.poll_capture()
         if phase == target:
@@ -338,6 +338,77 @@ stt_worker.run(Capture())
         with patch("builtins.input", return_value="") as keyboard:
             self.assertEqual(adapter.transcribe(b""), "")
         keyboard.assert_called_once()
+
+    def assert_initial_import_is_safe(self, mode):
+        from ada_adapters.voice_adapters import WhisperPushToTalkAdapter
+
+        script = r'''
+import sys
+import threading
+from types import SimpleNamespace
+sys.path.insert(0, sys.argv[1])
+import stt_worker
+
+reader_started = threading.Event()
+if sys.argv[2] == "ordering":
+    source = sys.stdin.buffer
+    class TrackedInput:
+        def readline(self, limit):
+            if threading.current_thread() is not threading.main_thread():
+                reader_started.set()
+            return source.readline(limit)
+    sys.stdin = SimpleNamespace(buffer=TrackedInput())
+
+class Capture:
+    def __init__(self):
+        self.starts = 0
+    def start(self):
+        if self.starts == 0:
+            if sys.argv[2] == "ordering":
+                assert not reader_started.is_set(), "Command reader overlaps native initialization"
+            else:
+                import numpy
+        elif sys.argv[2] == "ordering":
+            assert reader_started.is_set(), "Command reader was not started"
+        self.starts += 1
+    def check(self):
+        pass
+    def stop(self):
+        pass
+    def transcribe(self):
+        return f"capture-{self.starts}"
+
+stt_worker.run(Capture())
+'''
+        adapter = WhisperPushToTalkAdapter(
+            worker_command=[sys.executable, "-B", "-c", script, str(ROOT), mode],
+            init_timeout=10, stop_timeout=1, transcription_timeout=1)
+        self.addCleanup(adapter.shutdown)
+        process = None
+        identity = None
+        for number in (1, 2):
+            adapter.start_capture()
+            wait_phase(adapter, "recording", timeout=10)
+            if process is not None:
+                self.assertIs(adapter.process, process)
+                self.assertNotEqual(adapter._job_id, identity)
+            process, identity = adapter.process, adapter._job_id
+            adapter.stop_capture()
+            self.assertEqual(wait_phase(adapter, "complete"), f"capture-{number}")
+        adapter.shutdown()
+        self.assertIsNotNone(process.poll())
+        self.assertIsNone(adapter.process)
+        self.assertFalse(adapter._reader)
+
+    def test_initial_capture_precedes_background_command_reads(self):
+        self.assert_initial_import_is_safe("ordering")
+
+    def test_real_numpy_import_does_not_block_worker_initialization(self):
+        from importlib.util import find_spec
+
+        if find_spec("numpy") is None:
+            self.skipTest("NumPy is an optional speech dependency")
+        self.assert_initial_import_is_safe("numpy")
 
     def test_production_worker_protocol_caches_model_and_reserves_stdout(self):
         adapter = self.adapter()

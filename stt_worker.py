@@ -88,17 +88,21 @@ def run(capture=None):
     protocol = sys.stdout
     commands = queue.Queue(maxsize=8)
 
+    def read_command():
+        line = sys.stdin.buffer.readline(MAX_MESSAGE + 1)
+        if not line:
+            return None
+        if len(line) > MAX_MESSAGE or not line.endswith(b"\n"):
+            raise ValueError("Invalid IPC message size.")
+        return json.loads(line)
+
     def receive():
         try:
             while True:
-                line = sys.stdin.buffer.readline(MAX_MESSAGE + 1)
-                if not line:
-                    commands.put(None)
+                command = read_command()
+                commands.put(command)
+                if command is None:
                     return
-                if len(line) > MAX_MESSAGE or not line.endswith(b"\n"):
-                    commands.put(ValueError("Invalid IPC message size."))
-                    return
-                commands.put(json.loads(line))
         except Exception as error:
             commands.put(error)
 
@@ -109,7 +113,7 @@ def run(capture=None):
         protocol.write(message + "\n")
         protocol.flush()
 
-    threading.Thread(target=receive, daemon=True).start()
+    reader = None
     job_id = None
     recording = False
     # Third-party libraries may print: stdout remains exclusively protocol-owned.
@@ -117,7 +121,8 @@ def run(capture=None):
         while True:
             try:
                 try:
-                    command = commands.get(timeout=0.05)
+                    command = (read_command() if reader is None
+                               else commands.get(timeout=0.05))
                 except queue.Empty:
                     if recording:
                         capture.check()
@@ -134,6 +139,12 @@ def run(capture=None):
                     job_id = incoming
                     send(job_id, "initializing")
                     capture.start()
+                    if reader is None:
+                        # A blocked stdin reader can stall NumPy's native import
+                        # on Windows. Load dependencies after the first command,
+                        # but before starting concurrent command reads.
+                        reader = threading.Thread(target=receive, daemon=True)
+                        reader.start()
                     recording = True
                     send(job_id, "recording")
                 elif kind == "stop" and recording and incoming == job_id:

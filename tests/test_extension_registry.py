@@ -5,7 +5,7 @@ from threading import Event, Thread, current_thread
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from ada_core import (
     CORE_CONTRACT_VERSION, CapabilityError, CapabilityKind, CompletionResponse,
@@ -104,11 +104,13 @@ class ExtensionRegistryTests(unittest.TestCase):
             with self.subTest(stage=stage):
                 registry = ExtensionRegistry()
                 release, finished = Event(), Event()
+                workers = []
 
                 def hang(*args):
+                    workers.append(current_thread())
                     try:
                         release.wait()
-                        return object()
+                        return HealthReport(ExtensionState.READY) if stage == "probe" else object()
                     finally:
                         finished.set()
 
@@ -128,11 +130,15 @@ class ExtensionRegistryTests(unittest.TestCase):
                     self.assertFalse(caught.exception.retryable)
                     self.assertEqual(self.diagnostic(registry).state, ExtensionState.FAILED)
                     with self.assertRaises(CapabilityError):
-                        registry.enable("test.primary")
+                        registry.enable("test.primary", only_if_failed=True)
                 finally:
                     release.set()
                     self.assertTrue(finished.wait(1))
+                    workers[0].join(1)
+                    self.assertFalse(workers[0].is_alive())
                 self.assertEqual(self.diagnostic(registry).state, ExtensionState.FAILED)
+                registry.enable("test.primary", only_if_failed=True)
+                self.assertTrue(registry.execute(CapabilityKind.REASONING, lambda _: True))
         for stage in ("probe", "factory", "execute"):
             for error in (RuntimeError("Bearer private-token"), SystemExit("gsk_Private123")):
                 with self.subTest(stage=stage, error=type(error)):
@@ -150,6 +156,69 @@ class ExtensionRegistryTests(unittest.TestCase):
                     registry.register(self.manifest("healthy", CapabilityKind.MEMORY), object)
                     self.assertIsNotNone(registry.resolve(CapabilityKind.MEMORY))
 
+    def test_worker_keyboard_interrupt_propagates_without_failing_extension(self):
+        registry = ExtensionRegistry()
+        registry.register(self.manifest(), object)
+        registry.resolve(CapabilityKind.REASONING)
+        interrupt = KeyboardInterrupt()
+        with self.assertRaises(KeyboardInterrupt) as caught:
+            registry.execute(CapabilityKind.REASONING, Mock(side_effect=interrupt))
+        self.assertIs(caught.exception, interrupt)
+        self.assertEqual(self.diagnostic(registry).state, ExtensionState.READY)
+        self.assertTrue(registry.execute(CapabilityKind.REASONING, lambda _: True))
+
+    def test_interrupt_before_thread_launch_leaves_no_running_call(self):
+        registry = ExtensionRegistry()
+        registry.register(self.manifest(), object)
+        registry.resolve(CapabilityKind.REASONING)
+        operation = Mock()
+        with patch("ada_core.registry.Thread") as thread:
+            thread.return_value.start.side_effect = KeyboardInterrupt
+            with self.assertRaises(KeyboardInterrupt):
+                registry.execute(CapabilityKind.REASONING, operation)
+        operation.assert_not_called()
+        self.assertTrue(registry.execute(CapabilityKind.REASONING, lambda _: True))
+
+    def test_caller_keyboard_interrupt_stays_quarantined_only_until_worker_finishes(self):
+        for worker_already_done in (False, True):
+            with self.subTest(worker_already_done=worker_already_done):
+                registry = ExtensionRegistry()
+                registry.register(self.manifest(), object)
+                registry.resolve(CapabilityKind.REASONING)
+                started, release = Event(), Event()
+                workers = []
+
+                def operation(_):
+                    workers.append(current_thread())
+                    started.set()
+                    release.wait(2)
+
+                class InterruptingWait(Event):
+                    def wait(self, timeout=None):
+                        if timeout is None:  # Allow any subsequent cleanup wait.
+                            return super().wait(timeout)
+                        if worker_already_done:
+                            release.set()
+                            super().wait(timeout)
+                        elif not started.wait(1):
+                            raise AssertionError("operation did not start")
+                        raise KeyboardInterrupt
+
+                try:
+                    with patch("ada_core.registry.Event", side_effect=[InterruptingWait(), Event()]):
+                        with self.assertRaises(KeyboardInterrupt):
+                            registry.execute(CapabilityKind.REASONING, operation)
+                    if not worker_already_done:
+                        with self.assertRaises(CapabilityError):
+                            registry.enable("test.primary")
+                finally:
+                    release.set()
+                    for worker in workers:
+                        worker.join(1)
+                        self.assertFalse(worker.is_alive())
+                self.assertEqual(self.diagnostic(registry).state, ExtensionState.READY)
+                self.assertTrue(registry.execute(CapabilityKind.REASONING, lambda _: True))
+
     def test_disabling_active_extension_mid_session_reports_clear_error_on_next_call(self):
         registry = ExtensionRegistry()
         factory = Mock(return_value=object())
@@ -163,6 +232,8 @@ class ExtensionRegistryTests(unittest.TestCase):
         self.assertEqual(self.diagnostic(registry).state, ExtensionState.DISABLED)
         self.assertFalse(self.diagnostic(registry).active)
         call.assert_not_called()
+        registry.enable("test.primary", only_if_failed=True)
+        self.assertEqual(self.diagnostic(registry).state, ExtensionState.DISABLED)
         registry.enable("test.primary")
         self.assertIs(registry.resolve(CapabilityKind.REASONING), factory.return_value)
 

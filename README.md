@@ -134,10 +134,11 @@ preventing subsequent written chat. A memory-extension failure allows chat with
 an explicit notice that stored memories are unavailable. A reasoning outage,
 invalid key, or exhausted model chain produces no fabricated answer or memory
 success: failed turns do not enter history, and failed extraction never writes
-or deletes memory. You can inspect `/estado`, exit, or send a new turn to retry.
-Empty/truncated chat output gets one bounded retry; memory mutations are never
-automatically repeated. Registry timeouts bound waiting, not termination of
-in-process extension code; a still-running extension stays quarantined.
+or deletes memory. Invalid extracted values do not disable memory. `/estado`
+reports failures without resetting them. A new turn that uses a failed extension
+tries it again only after its previous call has finished. Memory mutations are
+never replayed automatically; empty/truncated chat output gets one bounded retry.
+Registry timeouts bound waiting, not termination of in-process extension code.
 Interactive microphone input instead uses short registry operations and a
 supervised subprocess. Startup/model loading is bounded to 30 seconds, stop/audio
 cleanup to 5 seconds, and transcription to 30 seconds. **Active recording has no

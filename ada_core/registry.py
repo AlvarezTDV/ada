@@ -13,10 +13,11 @@ disable() nor swapping providers disposes adapters or revokes escaped references
 
 from __future__ import annotations
 
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from enum import Enum
 import math
-from threading import Event, RLock, Thread
+from threading import Event, Lock, RLock, Thread, local
 import time
 from typing import Any, Callable
 
@@ -65,6 +66,46 @@ class _Extension:
     generation: int = 0
 
 
+_worker_context = local()
+
+
+class _InterruptScope:
+    def __init__(self):
+        self.lock = Lock()
+        self.interrupted = False
+        self.stop = None
+
+    def cancel(self):
+        with self.lock:
+            self.interrupted = True
+            if self.stop is not None:
+                self.stop()
+
+
+@contextmanager
+def _interruptible_resource(resource):
+    """Keep a worker-owned resource and its synchronous stop callback paired."""
+    scope = getattr(_worker_context, "interrupt_scope", None)
+    if scope is None:
+        with resource as owned:
+            yield owned
+        return
+    with ExitStack() as stack:
+        # Spawn and publish atomically with respect to cancellation. Close
+        # under the same lock so a stop cannot use a released OS handle.
+        with scope.lock:
+            if scope.interrupted:
+                raise KeyboardInterrupt
+            owned, stop = stack.enter_context(resource)
+            scope.stop = stop
+        try:
+            yield owned, stop
+        finally:
+            with scope.lock:
+                scope.stop = None
+                stack.close()
+
+
 class ExtensionRegistry:
     def __init__(self, allowed_extension_ids: set[str] | None = None):
         self._allowed = (None if allowed_extension_ids is None
@@ -106,10 +147,12 @@ class ExtensionRegistry:
         if entry.state == ExtensionState.FAILED:
             raise self._error(entry, ErrorCode.EXECUTION_FAILED, entry.reason)
 
-    def enable(self, extension_id):
+    def enable(self, extension_id, *, only_if_failed=False):
         """Enable or explicitly retry a failed/unavailable provider, if quiescent."""
         with self._lock:
             entry = self._extensions[extension_id]
+            if only_if_failed and entry.state != ExtensionState.FAILED:
+                return
             if entry.state == ExtensionState.REJECTED_INCOMPATIBLE:
                 raise self._error(entry, ErrorCode.INCOMPATIBLE_CONTRACT, entry.reason)
             if entry.running:
@@ -185,8 +228,22 @@ class ExtensionRegistry:
             generation = entry.generation
             entry.running = True
         done, abandoned, result = Event(), Event(), []
+        scope = _InterruptScope()
+        claimed = False
+
+        def abandon():
+            # The worker can only claim this call under the same registry lock.
+            abandoned.set()
+            if not claimed or done.is_set():
+                entry.running = False
 
         def run():
+            nonlocal claimed
+            with self._lock:
+                if abandoned.is_set():
+                    return
+                claimed = True
+            _worker_context.interrupt_scope = scope
             try:
                 result.append((True, operation()))
             except BaseException as exc:
@@ -198,12 +255,22 @@ class ExtensionRegistry:
                     if abandoned.is_set():
                         entry.running = False
 
-        Thread(target=run, daemon=True).start()
-        completed = done.wait(max(0.0, deadline - time.monotonic()))
+        completed = None
+        try:
+            Thread(target=run, daemon=True).start()
+            completed = done.wait(max(0.0, deadline - time.monotonic()))
+        except KeyboardInterrupt as interrupt:
+            try:
+                scope.cancel()
+            except Exception as cleanup_error:
+                raise interrupt from cleanup_error
+            raise
+        finally:
+            if completed is None:
+                with self._lock:
+                    abandon()
         with self._lock:
-            abandoned.set()
-            if done.is_set():
-                entry.running = False
+            abandon()
             if not completed:
                 error = CapabilityError.from_timeout(entry.manifest,
                                                      "Extension call timed out.")
@@ -212,10 +279,12 @@ class ExtensionRegistry:
                 if generation == entry.generation:
                     self._failed(entry, error)
                 raise error from None
+            success, value = result[0]
+            if not success and isinstance(value, KeyboardInterrupt):
+                raise value
             if generation != entry.generation:
                 raise self._error(entry, ErrorCode.EXECUTION_FAILED,
                                   "Extension was disabled or reconfigured during the call.")
-            success, value = result[0]
             if not success:
                 if isinstance(value, ImportError):
                     error = self._error(entry, ErrorCode.DEPENDENCY_MISSING,

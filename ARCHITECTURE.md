@@ -70,10 +70,13 @@ memory unchanged. STT and TTS errors are independent of reasoning and memory.
 For chat, selected memory is read through the registry; if unavailable, a visible
 notice accompanies the memory-free response. A provider failure instead returns
 an honest limited-mode error and does not commit the attempted turn. Extraction
-failure never invokes a memory mutation. Empty/truncated chat responses get one
-retry; writes/deletes never do. A new user turn explicitly retries reasoning,
-but `enable()` refuses recovery while a timed-out invocation is still running.
-Registry deadlines bound waiting, not SDK thread termination.
+failure never invokes a memory mutation. Invalid extracted records are rejected
+before calling the storage extension, so SQLite execution failures remain
+distinguishable from input errors. Empty/truncated
+chat responses get one retry; writes/deletes are never replayed. The next user
+turn that uses a failed capability can recover its extension. `enable()`
+refuses recovery while a timed-out invocation is still running. Registry
+deadlines bound waiting, not SDK thread termination.
 Interactive STT uses `InteractiveSpeechInputPort` alongside the unchanged
 `SpeechInputPort.transcribe(audio: bytes) -> str`. The orchestrator routes
 start/poll/stop through short `registry.execute` calls; user-duration waiting is
@@ -158,7 +161,10 @@ anonymous telemetry and automatic extensions/downloads are disabled.
 
 The positive action set contains only `open_page`, `read_page`, and `done`.
 Navigation is limited to the supplied public HTTPS host, with step/time bounds
-and parent-owned process-tree cancellation. No generic shell, file, upload,
+and parent-owned process-tree cancellation. On `Ctrl+C`, the registry stops
+the owned tree and reaps the browser worker before forwarding the interrupt.
+In-process calls without a cancellation hook stay busy until they return.
+No generic shell, file, upload,
 click, form-input or arbitrary-evaluation tool is exposed to the model. Trusted
 adapter code reads page text through CDP. These controls are not a complete
 network or operating-system sandbox; page scripts and subresources remain a

@@ -19,6 +19,18 @@ class SessionResult:
     notices: tuple[str, ...] = ()
 
 
+def _recover_failed(registry, capability):
+    """Retry availability on a new use, never replay the previous operation."""
+    for row in registry.diagnostics():
+        if row.capability == capability and row.state == ExtensionState.FAILED:
+            try:
+                registry.enable(row.extension_id, only_if_failed=True)
+            except CapabilityError:
+                # A still-running operation is quarantined; resolution will
+                # report it as failed or select another available extension.
+                pass
+
+
 class _MemoryCommands:
     """Legacy command-shaped facade whose storage calls all cross the registry."""
 
@@ -33,6 +45,7 @@ class _MemoryCommands:
                     "This memory extension does not support atomic memory commands.",
                 )
             return operation(port)
+        _recover_failed(self.registry, CapabilityKind.MEMORY)
         return self.registry.execute(CapabilityKind.MEMORY, invoke)
 
     def get_all_memories(self):
@@ -44,8 +57,14 @@ class _MemoryCommands:
                 not isinstance(record, dict) for record in records):
             raise ValueError("Expected a non-empty array of memory objects")
         items = tuple(MemoryItem(record.get("category", "general"),
-                                 record.get("key"), record.get("value"))
+                                  record.get("key"), record.get("value"))
                       for record in records)
+        for item in items:
+            for value in (item.category, item.key, item.value):
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError("Memory category, key and value must be non-empty strings")
+                # JSON accepts unpaired surrogates, but storage cannot bind them as text.
+                value.encode("utf-8")
         return [dict(category=item.category, key=item.key, value=item.value)
                 for item in self._execute(lambda port: port.save_batch(items))]
 
@@ -128,6 +147,7 @@ class SessionOrchestrator:
 
     def _recall(self, query):
         try:
+            _recover_failed(self.registry, CapabilityKind.MEMORY)
             return self.registry.execute(CapabilityKind.MEMORY, lambda port: port.recall(query)), ()
         except CapabilityError as error:
             return (), (f"Memoria no disponible para este turno. {self._error(error).text}",)
@@ -213,6 +233,7 @@ class SessionOrchestrator:
 
     def speak(self, text):
         try:
+            _recover_failed(self.registry, CapabilityKind.TTS)
             self.registry.execute(CapabilityKind.TTS, lambda port: port.speak(text))
             return SessionResult("", kind="speech")
         except CapabilityError as error:
@@ -232,6 +253,7 @@ class SessionOrchestrator:
             try:
                 if self._navigation_validator is not None:
                     self._navigation_validator(arguments[0])
+                _recover_failed(self.registry, CapabilityKind.NAVIGATION)
                 result = self.registry.execute(
                     CapabilityKind.NAVIGATION,
                     lambda port: port.navigate(WebNavigationRequest(*arguments)),

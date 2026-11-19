@@ -13,7 +13,11 @@ import socket
 import subprocess
 import sys
 import tempfile
+from threading import Lock
+import time
 from urllib.parse import urlsplit
+
+from ada_core.registry import _interruptible_resource
 
 ROOT = Path(__file__).resolve().parent
 TIMEOUT_SECONDS = 180
@@ -107,13 +111,22 @@ def worker_job(process):
     class ExtendedLimits(ctypes.Structure):
         _fields_ = [("basic", BasicLimits), ("io", ctypes.c_ulonglong * 6),
                     ("process_memory", ctypes.c_size_t), ("job_memory", ctypes.c_size_t),
-                    ("peak_process_memory", ctypes.c_size_t), ("peak_job_memory", ctypes.c_size_t)]
+                     ("peak_process_memory", ctypes.c_size_t), ("peak_job_memory", ctypes.c_size_t)]
+
+    class BasicAccounting(ctypes.Structure):
+        _fields_ = [("times", ctypes.c_longlong * 4), ("page_faults", wintypes.DWORD),
+                    ("total_processes", wintypes.DWORD), ("active_processes", wintypes.DWORD),
+                    ("terminated_processes", wintypes.DWORD)]
 
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
     kernel.CreateJobObjectW.restype = wintypes.HANDLE
     kernel.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
     kernel.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    kernel.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel.QueryInformationJobObject.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p,
+    ]
     kernel.CloseHandle.argtypes = [wintypes.HANDLE]
     handle = kernel.CreateJobObjectW(None, None)
     if not handle:
@@ -126,23 +139,67 @@ def worker_job(process):
                 or not kernel.AssignProcessToJobObject(handle, wintypes.HANDLE(int(process._handle)))):
             stop_worker(process)
             raise BrowserError("No se pudo aislar el proceso del navegador.")
+        def terminate():
+            if not kernel.TerminateJobObject(handle, 1):
+                raise ctypes.WinError(ctypes.get_last_error())
+            # Termination is asynchronous for descendants. Keep the job
+            # handle valid until the OS confirms the tree is no longer active.
+            accounting = BasicAccounting()
+            deadline = time.monotonic() + 10
+            while True:
+                if not kernel.QueryInformationJobObject(
+                        handle, 1, ctypes.byref(accounting), ctypes.sizeof(accounting), None):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                if not accounting.active_processes:
+                    break
+                if time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired("browser job termination", 10)
+                time.sleep(0.01)
+
         # The worker is still waiting on stdin; it cannot launch Edge before assignment.
-        yield
+        yield terminate
     finally:
         kernel.CloseHandle(handle)
 
 
 def stop_worker(process) -> None:
     """Stop only the owned worker and its browser descendants."""
-    if process.poll() is not None:
-        return
     if os.name == "nt":
+        if process.poll() is not None:
+            return
         killer = Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32/taskkill.exe"
         subprocess.run([str(killer), "/PID", str(process.pid), "/T", "/F"],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=False)
     else:
-        os.killpg(process.pid, signal.SIGKILL)
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
     process.wait(timeout=10)
+
+
+@contextmanager
+def _browser_process(executable, job):
+    options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
+    process = subprocess.Popen([str(executable), "-B", str(ROOT / "browser_worker.py")],
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                               cwd=job, env=worker_environment(job), **options)
+    with worker_job(process) as terminate_job:
+        stop_lock, stopped = Lock(), False
+
+        def stop():
+            nonlocal stopped
+            # A browser deadline and Ctrl+C can race; only stop this job once.
+            with stop_lock:
+                if not stopped:
+                    if terminate_job is None:
+                        stop_worker(process)
+                    else:
+                        terminate_job()
+                        process.wait(timeout=10)
+                    stopped = True
+
+        yield process, stop
 
 
 def run_task(url: str, task: str) -> BrowserResult:
@@ -151,17 +208,12 @@ def run_task(url: str, task: str) -> BrowserResult:
         raise BrowserError("Usa /navegar <https-url> <tarea de lectura> (máximo 4000 caracteres).")
     executable = worker_python()
     with tempfile.TemporaryDirectory(prefix="ada-browser-job-") as directory:
-        job = Path(directory)
-        options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
-        process = subprocess.Popen([str(executable), "-B", str(ROOT / "browser_worker.py")],
-                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                   cwd=job, env=worker_environment(job), **options)
-        with worker_job(process):
+        with _interruptible_resource(_browser_process(executable, Path(directory))) as (process, stop):
             try:
                 output, _ = process.communicate(input=json.dumps({"url": url, "task": task}).encode(),
                                                 timeout=TIMEOUT_SECONDS)
             except (subprocess.TimeoutExpired, KeyboardInterrupt) as error:
-                stop_worker(process)
+                stop()
                 if isinstance(error, KeyboardInterrupt):
                     raise
                 raise BrowserError("La navegación agotó su tiempo y se detuvo; no se reintentó.") from None

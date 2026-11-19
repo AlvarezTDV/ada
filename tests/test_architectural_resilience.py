@@ -4,6 +4,7 @@ import copy
 import io
 import os
 from pathlib import Path
+import sqlite3
 import sys
 import threading
 import time
@@ -14,8 +15,8 @@ from rich.console import Console
 
 import memory
 from ada_core import (
-    CapabilityKind, ExtensionManifest, ExtensionRegistry, ExtensionState,
-    HealthReport, SideEffectProfile,
+    CapabilityError, CapabilityKind, ErrorCode, ExtensionManifest, ExtensionRegistry,
+    ExtensionState, HealthReport, SideEffectProfile, WebNavigationResponse,
 )
 from ada_adapters import GroqChainReasoningAdapter, SqliteMemoryAdapter
 from test_groq_chat_provider import completion, status_error
@@ -99,6 +100,44 @@ class ArchitecturalResilienceTests(IsolatedPromptFixture):
             notice = session.listen() if capability == CapabilityKind.STT else session.speak("hola")
             self.assertEqual(notice.kind, "error")
             self.assertEqual(session.handle_text("hola").kind, "chat")
+
+    def test_optional_extensions_recover_only_on_the_next_explicit_turn(self):
+        cases = (
+            (CapabilityKind.NAVIGATION, "navigate", ErrorCode.EXECUTION_FAILED,
+             WebNavigationResponse("página", "https://example.com"), "navigation",
+             lambda session: session.handle_text("/navegar https://example.com resume")),
+            (CapabilityKind.TTS, "speak", ErrorCode.TIMEOUT, None, "speech",
+             lambda session: session.speak("hola")),
+            (CapabilityKind.STT, "transcribe", ErrorCode.EXECUTION_FAILED, "hola", "input",
+             lambda session: session.listen()),
+            (CapabilityKind.STT, "transcribe", ErrorCode.DEPENDENCY_MISSING, "hola", "input",
+             lambda session: session.listen()),
+        )
+        for capability, method, code, output, kind, turn in cases:
+            with self.subTest(capability=capability, code=code):
+                registry = self.minimal_registry()
+                manifest = ExtensionManifest(f"flaky.{capability.value}", capability,
+                                             SideEffectProfile.PURE_READ)
+                operation = Mock(side_effect=[CapabilityError(code, capability, "first call"), output])
+                adapter = type("FakeAdapter", (), {})()
+                setattr(adapter, method, operation)
+                registry.register(manifest, lambda: adapter)
+                session = self.session(registry)
+                before, database = list(session.messages), self.snapshot()
+
+                failed = turn(session)
+                state = "UNAVAILABLE_DEPENDENCY" if code == ErrorCode.DEPENDENCY_MISSING else "FAILED"
+                self.assertEqual(failed.kind, "error")
+                self.assertIn(f"{capability.value}/{code.value}", failed.text)
+                self.assertIn(f"{manifest.extension_id}={state}", failed.text)
+                self.assertIn(f"{manifest.extension_id} | yes | yes | yes | no | {state}",
+                              session.status().text)
+                operation.assert_called_once()
+                self.assertEqual((session.messages, self.snapshot()), (before, database))
+
+                self.assertEqual(turn(session).kind, kind)
+                self.assertEqual(operation.call_count, 2)
+                self.assertEqual((session.messages, self.snapshot()), (before, database))
 
     def test_reasoning_provider_outage_enters_honest_limited_mode_without_corrupting_db_or_history(self):
         request = httpx.Request("POST", ada.GROQ_BASE_URL)
@@ -204,25 +243,70 @@ class ArchitecturalResilienceTests(IsolatedPromptFixture):
         self.assertEqual(active, ["reasoning.ollama_local"])
         self.assertTrue(args.speak)
 
-    def test_memory_batches_preserve_atomicity_and_actual_deletion_acknowledgements(self):
+    def test_malformed_memory_batches_leave_storage_ready_for_recall_and_save(self):
         session = self.session()
-        for content in ('[{"key":"edad","value":"30"},{}]',
-                        '[{"key":"bebida","value":"agua"},{"key":"blocked","value":"no"}]'):
-            with memory.get_db_connection() as conn:
-                conn.execute("""CREATE TRIGGER IF NOT EXISTS fail_insert BEFORE INSERT ON memories
-                    WHEN NEW.key = 'blocked' BEGIN SELECT RAISE(ABORT, 'blocked'); END""")
-            self.client.chat.completions.create.return_value = completion(content)
+        self.assertEqual(session.handle_text("¿Cuál es mi bebida?").kind, "chat")
+        for command, content, expected in (
+            ("Anota mi edad", '[{"key":"edad","value":30}]',
+             "Hubo un error al intentar extraer y guardar la información."),
+            ("Anota mi edad", '[{"key":"edad","value":"30"},{}]',
+             "Hubo un error al intentar extraer y guardar la información."),
+            ("Anota mi ciudad", r'[{"key":"ciudad","value":"Bogot\ud800"}]',
+             "Hubo un error al intentar extraer y guardar la información."),
+            ("Borra mi bebida", '["bebida", 30]',
+             "Hubo un error al procesar el borrado de memoria."),
+        ):
+            self.client.chat.completions.create.side_effect = [
+                completion(content), completion("té"), completion('[{"key":"edad","value":"30"}]'),
+            ]
             before, database = copy.deepcopy(session.messages), self.snapshot()
-            self.assertEqual(session.handle_text("Anota mi edad").kind, "error")
+            result = session.handle_text(command)
+            self.assertEqual((result.kind, result.text), ("error", expected))
             self.assertEqual(self.snapshot(), database)
             self.assertEqual(session.messages, before)
-            session = self.session()
+            self.assertIn("memory.sqlite | yes | yes | yes | yes | READY", session.status().text)
+            recall = session.handle_text("¿Cuál es mi bebida?")
+            self.assertEqual((recall.kind, recall.text, recall.notices), ("chat", "té", ()))
+            self.assertIn("té", self.client.chat.completions.create.call_args.kwargs["messages"][0]["content"])
+            result = session.handle_text("Anota mi edad")
+            self.assertEqual((result.kind, result.text), ("memory", "Información guardada."))
+            self.assertIn(("general", "edad", "30"), memory.get_all_memories())
+
+    def test_memory_batches_preserve_atomicity_and_actual_deletion_acknowledgements(self):
+        session = self.session()
+        with memory.get_db_connection() as conn:
+            conn.execute("""CREATE TRIGGER fail_insert BEFORE INSERT ON memories
+                WHEN NEW.key = 'blocked' BEGIN SELECT RAISE(ABORT, 'blocked'); END""")
+        self.client.chat.completions.create.return_value = completion(
+            '[{"key":"bebida","value":"agua"},{"key":"blocked","value":"no"}]')
+        before, database = copy.deepcopy(session.messages), self.snapshot()
+        failure = session.handle_text("Anota mi edad")
+        self.assertEqual(failure.kind, "error")
+        self.assertIn("memory/execution_failed", failure.text)
+        self.assertEqual((session.messages, self.snapshot()), (before, database))
+
         self.client.chat.completions.create.return_value = completion('["bebida"]')
         with memory.get_db_connection() as conn:
             conn.execute("CREATE TRIGGER keep BEFORE DELETE ON memories BEGIN SELECT RAISE(IGNORE); END")
         result = session.handle_text("Borra mi bebida")
-        self.assertNotIn("Información eliminada", result.text)
+        self.assertEqual((result.kind, result.text),
+                         ("memory", "No encontré ese dato en mi memoria para borrarlo."))
         self.assertEqual(memory.get_all_memories(), [("preferences", "bebida", "té")])
+
+    def test_recall_recovers_on_a_new_turn_without_replaying_the_failed_read(self):
+        session = self.session()
+        self.assertEqual(session.handle_text("hola").kind, "chat")
+        before = self.snapshot()
+        with patch.object(memory, "select_memories_for_prompt",
+                          side_effect=sqlite3.OperationalError("transient read failure")) as recall:
+            failed = session.handle_text("¿Cuál es mi bebida?")
+            self.assertEqual(failed.kind, "chat")
+            self.assertIn("memory/execution_failed", failed.notices[0])
+            recall.assert_called_once()
+        recovered = session.handle_text("¿Cuál es mi bebida?")
+        self.assertEqual((recovered.kind, recovered.notices), ("chat", ()))
+        self.assertIn("té", self.client.chat.completions.create.call_args.kwargs["messages"][0]["content"])
+        self.assertEqual(self.snapshot(), before)
 
     def test_memory_commands_use_complete_catalogue_and_confirm_only_committed_batches(self):
         for index in range(7):

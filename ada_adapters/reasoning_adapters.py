@@ -1,6 +1,6 @@
 """ReasoningPort bridges using the existing provider chain and request policy."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib import import_module
 import os
 
@@ -30,6 +30,9 @@ class _ReasoningAdapter:
                                ErrorCode.QUOTA_EXCEEDED),
         )
 
+    def _complete_retry(self, request: CompletionRequest) -> CompletionResponse:
+        return self.complete(replace(request, model=self._model or request.model))
+
     def complete(self, request: CompletionRequest) -> CompletionResponse:
         try:
             helpers = import_module("ada")
@@ -51,6 +54,7 @@ class _ReasoningAdapter:
                 temperature=request.temperature, max_tokens=request.max_tokens,
                 think=request.mode == TurnMode.REASONING, provider=self.provider,
             )
+            self._model = selected_model
         except helpers.ChatConfigError as error:
             raise self._error(ErrorCode.AUTH_INVALID,
                               "The provider credentials are missing or invalid.") from error

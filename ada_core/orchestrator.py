@@ -91,7 +91,7 @@ class SessionOrchestrator:
         self._stt_failure = None
         self._stt_port = None
 
-    def _complete(self, request):
+    def _complete(self, request, *, retry=False):
         # A new user turn is an explicit retry, never a replay of a timed-out
         # mutation. enable() refuses while a timed-out read is still running.
         if self._reasoning_failure is not None:
@@ -99,9 +99,17 @@ class SessionOrchestrator:
             if error.extension_id:
                 self.registry.enable(error.extension_id)
             self._reasoning_failure = None
+
+        def complete(port):
+            if retry:
+                # Only adapters that track a rotation override the requested model.
+                complete_retry = getattr(type(port), "_complete_retry", None)
+                if callable(complete_retry):
+                    return complete_retry(port, request)
+            return port.complete(request)
+
         try:
-            response = self.registry.execute(
-                CapabilityKind.REASONING, lambda port: port.complete(request))
+            response = self.registry.execute(CapabilityKind.REASONING, complete)
         except CapabilityError as error:
             self._reasoning_failure = error
             raise
@@ -295,7 +303,7 @@ class SessionOrchestrator:
                 if error.code not in (ErrorCode.EMPTY_RESPONSE, ErrorCode.INCOMPLETE_RESPONSE):
                     raise
                 response = self._complete(replace(
-                    request, max_tokens=request.max_tokens * 3, mode=TurnMode.TASK))
+                    request, max_tokens=request.max_tokens * 3, mode=TurnMode.TASK), retry=True)
         except CapabilityError as error:
             return self._error(error)
         self.messages = [*turn, ChatMessage("assistant", response.text)]

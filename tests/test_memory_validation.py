@@ -1,14 +1,46 @@
+from contextlib import closing
+import gc
 import hashlib
 import io
 from pathlib import Path
 import sqlite3
+from tempfile import TemporaryDirectory
 import types
+import warnings
+from unittest import TestCase
 from unittest.mock import Mock, patch
 
 from rich.console import Console
 
 import memory
 from test_memory_prompt import IsolatedPromptFixture, ada
+
+
+class MemoryConnectionContextTests(TestCase):
+    def test_factory_context_closes_after_commit_and_rollback(self):
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        db = Path(directory.name) / "isolated.db"
+
+        with patch.object(memory, "DB_PATH", str(db)):
+            with memory.get_db_connection() as committed:
+                self.addCleanup(committed.close)
+                committed.execute("CREATE TABLE sample (name TEXT)")
+                committed.execute("INSERT INTO sample VALUES ('committed')")
+
+            before = hashlib.sha256(db.read_bytes()).digest()
+            with self.assertRaisesRegex(RuntimeError, "^rollback$"):
+                with memory.get_db_connection() as rolled_back:
+                    self.addCleanup(rolled_back.close)
+                    rolled_back.execute("INSERT INTO sample VALUES ('rolled back')")
+                    raise RuntimeError("rollback")
+
+        self.assertEqual(hashlib.sha256(db.read_bytes()).digest(), before)
+        with closing(sqlite3.connect(db)) as audit:
+            self.assertEqual(audit.execute("SELECT name FROM sample").fetchall(), [("committed",)])
+        for conn in (committed, rolled_back):
+            with self.assertRaisesRegex(sqlite3.ProgrammingError, r"closed database"):
+                conn.execute("SELECT 1")
 
 
 class MemoryValidationTests(IsolatedPromptFixture):
@@ -35,6 +67,32 @@ class MemoryValidationTests(IsolatedPromptFixture):
         self.assertEqual(memory.get_all_memories(), [
             ("preferences", "bebida", "té"), ("general", "edad", "30")
         ])
+
+    def test_memory_operations_close_sqlite_connections_without_resource_warnings(self):
+        record = {"category": "general", "key": "sqlite", "value": "connection"}
+        def connect():
+            return sqlite3.connect(memory.DB_PATH)
+
+        # Bypass the fixture's tracking factory so leaked connections can be collected.
+        gc.collect()
+        with (
+            patch.object(memory, "get_db_connection", connect),
+            warnings.catch_warnings(record=True) as caught,
+        ):
+            warnings.simplefilter("always", ResourceWarning)
+            self.assertEqual(memory.save_memories([record]), [record])
+            self.assertIn(("general", "sqlite", "connection"), memory.get_all_memories())
+            self.assertIn("connection", memory.select_memories_for_prompt("sqlite"))
+            self.assertEqual(memory.delete_memories(["sqlite"]), ["sqlite"])
+            gc.collect()
+        resource_warnings = []
+        for warning in caught:
+            if issubclass(warning.category, ResourceWarning):
+                resource_warnings.append(str(warning.message))
+                if isinstance(warning.source, sqlite3.Connection):
+                    # Release leaked handles so the fixture can clean up even on Windows.
+                    warning.source.close()
+        self.assertEqual(resource_warnings, [])
 
     def test_save_preserves_upsert_and_record_order(self):
         memory.save_memories([{"category": "gustos", "key": "bebida", "value": "café"}])

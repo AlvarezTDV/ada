@@ -15,8 +15,9 @@ from rich.console import Console
 
 import memory
 from ada_core import (
-    CapabilityError, CapabilityKind, ErrorCode, ExtensionManifest, ExtensionRegistry,
-    ExtensionState, HealthReport, SideEffectProfile, WebNavigationResponse,
+    CapabilityError, CapabilityKind, CompletionResponse, ErrorCode, ExtensionManifest,
+    ExtensionRegistry, ExtensionState, HealthReport, SideEffectProfile, TurnMode,
+    WebNavigationResponse,
 )
 from ada_adapters import GroqChainReasoningAdapter, SqliteMemoryAdapter
 from test_groq_chat_provider import completion, status_error
@@ -228,6 +229,30 @@ class ArchitecturalResilienceTests(IsolatedPromptFixture):
         self.assertIn(ada.DEFAULT_GROQ_MODELS[1], session.handle_text("/estado").text)
         self.assertEqual(len(session.messages), 5)
 
+    def test_groq_retry_keeps_rotated_model_after_unusable_response(self):
+        primary, backup = ada.DEFAULT_GROQ_MODELS
+        create = self.client.chat.completions.create
+        for content, reason, confirmed_primary in (("", "stop", False), ("partial", "length", True)):
+            with self.subTest(finish_reason=reason, confirmed_primary=confirmed_primary):
+                session = self.session()
+                if confirmed_primary:
+                    create.side_effect = None
+                    self.assertEqual(session.handle_text("hola").text, "Respuesta confirmada")
+                    self.assertEqual(session.model, primary)
+                create.reset_mock()
+                create.side_effect = [
+                    status_error(ada.openai.RateLimitError, 429),
+                    completion(content, finish_reason=reason),
+                    completion("respaldo confirmado"),
+                ]
+                result = session.handle_text("otra pregunta")
+                self.assertEqual((result.kind, result.text), ("chat", "respaldo confirmado"))
+                self.assertEqual([call.kwargs["model"] for call in create.call_args_list],
+                                 [primary, backup, backup])
+                self.assertEqual(session.model, backup)
+                self.assertEqual([message.content for message in session.messages[-2:]],
+                                 ["otra pregunta", "respaldo confirmado"])
+
     def test_provider_local_flag_switches_active_reasoning_extension_to_ollama(self):
         args = ada.build_argument_parser().parse_args(["--provider", "local", "--speak"])
         self.client.base_url = ada.DEFAULT_LOCAL_URL
@@ -242,6 +267,49 @@ class ArchitecturalResilienceTests(IsolatedPromptFixture):
                   and row.capability == CapabilityKind.REASONING]
         self.assertEqual(active, ["reasoning.ollama_local"])
         self.assertTrue(args.speak)
+
+    def test_local_retry_keeps_the_selected_model(self):
+        self.client.base_url = ada.DEFAULT_LOCAL_URL
+        self.factory.return_value = (self.client, ada.DEFAULT_LOCAL_MODEL)
+        session = self.session(provider="local")
+        self.assertEqual(session.handle_text("hola").kind, "chat")
+        create = self.client.chat.completions.create
+        create.reset_mock()
+        create.side_effect = [completion("partial", finish_reason="length"), completion("completo")]
+        result = session.handle_text("otra pregunta")
+        self.assertEqual((result.kind, result.text), ("chat", "completo"))
+        self.assertEqual([call.kwargs["model"] for call in create.call_args_list],
+                         [ada.DEFAULT_LOCAL_MODEL, ada.DEFAULT_LOCAL_MODEL])
+
+    def test_retry_preserves_model_for_stateless_reasoning_port(self):
+        models = []
+
+        class Port:
+            def complete(self, request):
+                models.append(request.model)
+                if len(models) == 2:
+                    raise CapabilityError(
+                        ErrorCode.INCOMPLETE_RESPONSE, CapabilityKind.REASONING, "partial"
+                    )
+                model = request.model or (
+                    "named-model" if request.mode == TurnMode.REASONING else "default-model"
+                )
+                return CompletionResponse(f"answer from {model}", model)
+
+        registry = self.minimal_registry()
+        registry.register(
+            ExtensionManifest(
+                "reasoning.fixture", CapabilityKind.REASONING, SideEffectProfile.PURE_READ
+            ),
+            Port,
+        )
+        registry.set_preferred_provider(CapabilityKind.REASONING, "reasoning.fixture")
+        session = self.session(registry)
+        text = "Compara estas dos opciones"
+        self.assertEqual(session.handle_text(text).text, "answer from named-model")
+        result = session.handle_text(text)
+        self.assertEqual((result.kind, result.text), ("chat", "answer from named-model"))
+        self.assertEqual(models, ["", "named-model", "named-model"])
 
     def test_malformed_memory_batches_leave_storage_ready_for_recall_and_save(self):
         session = self.session()

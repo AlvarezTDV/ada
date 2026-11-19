@@ -1,15 +1,35 @@
 import sqlite3
+from contextlib import ExitStack, contextmanager
 import os
 import re
 import unicodedata
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "ada_memory.db")
 
+
+class _ClosingConnection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 def get_db_connection():
-    return sqlite3.connect(DB_PATH)
+    return sqlite3.connect(DB_PATH, factory=_ClosingConnection)
+
+
+@contextmanager
+def _db_transaction():
+    with ExitStack() as stack:
+        conn = get_db_connection()
+        # Patched factories can still return a plain SQLite connection.
+        if not isinstance(conn, _ClosingConnection):
+            stack.callback(conn.close)
+        yield stack.enter_context(conn)
 
 def init_db():
-    with get_db_connection() as conn:
+    with _db_transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS memories (
@@ -25,7 +45,7 @@ def init_db():
 
 def reset_db():
     init_db()
-    with get_db_connection() as conn:
+    with _db_transaction() as conn:
         conn.cursor().execute("DELETE FROM memories")
         conn.commit()
 
@@ -63,7 +83,7 @@ def save_memories(memories_list: list) -> list:
             "value": _validate_text(mem.get("value"), "value"),
         })
     init_db()
-    with get_db_connection() as conn:
+    with _db_transaction() as conn:
         cursor = conn.cursor()
         for mem in records:
             cursor.execute("""
@@ -84,7 +104,7 @@ def delete_memories(keys: list) -> list:
         return []
     init_db()
     deleted = []
-    with get_db_connection() as conn:
+    with _db_transaction() as conn:
         cursor = conn.cursor()
         for safe_k in normalized_keys:
             cursor.execute("DELETE FROM memories WHERE key = ?", (safe_k,))
@@ -95,7 +115,7 @@ def delete_memories(keys: list) -> list:
 
 def get_all_memories():
     init_db()
-    with get_db_connection() as conn:
+    with _db_transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT category, key, value FROM memories ORDER BY id ASC")
         return cursor.fetchall()
@@ -140,7 +160,7 @@ def select_memories_for_prompt(query: str) -> str:
     terms = _words(query)
     if terms:
         init_db()
-        with get_db_connection() as conn:
+        with _db_transaction() as conn:
             rows = conn.execute(
                 "SELECT category, key, value FROM memories ORDER BY updated_at DESC, id DESC"
             ).fetchall()

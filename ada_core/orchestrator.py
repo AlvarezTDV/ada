@@ -1,6 +1,7 @@
 """Session policy over capability ports; no SDK, SQLite, audio or browser imports."""
 
 from dataclasses import dataclass, replace
+from ipaddress import ip_address
 import re
 import time
 
@@ -19,12 +20,63 @@ class SessionResult:
     notices: tuple[str, ...] = ()
 
 
-def _recover_failed(registry, capability):
+_UNUSABLE_RESPONSE = (ErrorCode.EMPTY_RESPONSE, ErrorCode.INCOMPLETE_RESPONSE)
+_REASONING_FALLBACK = (
+    ErrorCode.QUOTA_EXCEEDED, ErrorCode.TIMEOUT, ErrorCode.NETWORK_UNAVAILABLE,
+    ErrorCode.EXECUTION_FAILED, ErrorCode.DEPENDENCY_MISSING, *_UNUSABLE_RESPONSE,
+)
+
+
+def _external_provider(manifest):
+    for host in manifest.permissions.network_hosts:
+        if host.lower() == "localhost":
+            continue
+        try:
+            if ip_address(host).is_loopback:
+                continue
+        except ValueError:
+            pass  # A declared non-local hostname.
+        return True
+    return False
+
+
+def _checked_completion(complete, request):
+    response = complete(request)
+    text = getattr(response, "text", None)
+    if not isinstance(text, str) or not isinstance(getattr(response, "model", None), str):
+        raise CapabilityError(ErrorCode.EXECUTION_FAILED, CapabilityKind.REASONING,
+                              "The reasoning provider returned an invalid completion.")
+    if getattr(response, "finish_reason", None) == "length":
+        raise CapabilityError(ErrorCode.INCOMPLETE_RESPONSE, CapabilityKind.REASONING,
+                              "The provider returned an incomplete response.")
+    if not text.strip():
+        raise CapabilityError(ErrorCode.EMPTY_RESPONSE, CapabilityKind.REASONING,
+                              "The provider returned an empty response.")
+    return response
+
+
+def _complete_reasoning_port(port, request):
+    try:
+        return _checked_completion(port.complete, request)
+    except CapabilityError as error:
+        if error.code not in _UNUSABLE_RESPONSE:
+            raise
+    retry = replace(request, max_tokens=request.max_tokens * 3, mode=TurnMode.TASK)
+    # Only adapters tracking model rotation override the requested model for this retry.
+    complete_retry = getattr(port, "_complete_retry", None) if hasattr(type(port), "_complete_retry") else None
+    return _checked_completion(complete_retry if callable(complete_retry) else port.complete, retry)
+
+
+def _recover_failed(registry, capability, *, retry_unavailable=False):
     """Retry availability on a new use, never replay the previous operation."""
     for row in registry.diagnostics():
-        if row.capability == capability and row.state == ExtensionState.FAILED:
+        if row.capability == capability and (
+            row.state == ExtensionState.FAILED
+            or (retry_unavailable and row.state == ExtensionState.UNAVAILABLE_DEPENDENCY)
+        ):
             try:
-                registry.enable(row.extension_id, only_if_failed=True)
+                registry.enable(row.extension_id, only_if_failed=True,
+                                retry_unavailable=retry_unavailable)
             except CapabilityError:
                 # A still-running operation is quarantined; resolution will
                 # report it as failed or select another available extension.
@@ -34,8 +86,9 @@ def _recover_failed(registry, capability):
 class _MemoryCommands:
     """Legacy command-shaped facade whose storage calls all cross the registry."""
 
-    def __init__(self, registry):
+    def __init__(self, registry, read_available):
         self.registry = registry
+        self._read_available = read_available
 
     def _execute(self, operation):
         def invoke(port):
@@ -50,7 +103,7 @@ class _MemoryCommands:
 
     def get_all_memories(self):
         return [(item.category, item.key, item.value)
-                for item in self._execute(lambda port: port.list_all())]
+                for item in self._execute(lambda port: port.list_all() if self._read_available(port) else ())]
 
     def save_memories(self, records):
         if not isinstance(records, list) or not records or any(
@@ -76,52 +129,78 @@ class SessionOrchestrator:
     """Own history and turn routing; capability failures never commit failed turns."""
 
     def __init__(self, registry, *, prompt_factory, classify_input, memory_command,
-                 configured_models=None, navigation_validator=None):
+                 configured_models=None, navigation_validator=None, missing_reasoning_env=None,
+                 memory_read_available=None):
         self.registry = registry
         self._prompt = prompt_factory
         self._classify = classify_input
         self._memory_command = memory_command
-        self._store = _MemoryCommands(registry)
+        self._memory_read_available = memory_read_available or (lambda port: True)
+        self._store = _MemoryCommands(registry, self._memory_read_available)
         self._configured_models = configured_models or {}
         self._navigation_validator = navigation_validator
+        self._missing_reasoning_env = missing_reasoning_env or (lambda manifest: ())
         self.model = ""
         self.messages = [ChatMessage("system", self._prompt(()))]
-        self._reasoning_failure = None
+        self._reasoning_provider = None
         self._reload_prompt = False
         self._stt_failure = None
         self._stt_port = None
 
-    def _complete(self, request, *, retry=False):
-        # A new user turn is an explicit retry, never a replay of a timed-out
-        # mutation. enable() refuses while a timed-out read is still running.
-        if self._reasoning_failure is not None:
-            error = self._reasoning_failure
-            if error.extension_id:
-                self.registry.enable(error.extension_id)
-            self._reasoning_failure = None
+    def _complete(self, request, notices, on_notice):
+        capability = CapabilityKind.REASONING
+        _recover_failed(self.registry, capability, retry_unavailable=True)
+        failures = []
+        preferred, candidates = self.registry.provider_catalog(capability)
+        previous_external = _external_provider(preferred) if preferred is not None else None
+        for manifest in candidates:
+            provider = manifest.extension_id
+            external = _external_provider(manifest)
+            missing = self._missing_reasoning_env(manifest) if manifest != preferred and external else ()
+            if missing:
+                failures.append(CapabilityError(
+                    ErrorCode.AUTH_INVALID, capability,
+                    f"No se intentó: falta configurar {', '.join(missing)}.", extension_id=provider,
+                ))
+                continue
+            if previous_external is False and external:
+                notice = f"El proveedor local no está disponible. Se intentará con el proveedor en la nube: {provider}."
+                notices.append(notice)
+                if on_notice is not None:
+                    on_notice(notice)
+            previous_external = external
+            candidate = request if provider == self._reasoning_provider else replace(request, model="")
+            try:
+                response = self.registry.execute_provider(
+                    provider, lambda port, candidate=candidate: _complete_reasoning_port(port, candidate),
+                )
+            except CapabilityError as error:
+                failures.append(error)
+                if error.code not in _REASONING_FALLBACK:
+                    break
+                continue
+            self._reasoning_provider = provider
+            self.model = response.model
+            return response
 
-        def complete(port):
-            if retry:
-                # Only adapters that track a rotation override the requested model.
-                complete_retry = getattr(type(port), "_complete_retry", None)
-                if callable(complete_retry):
-                    return complete_retry(port, request)
-            return port.complete(request)
+        if not failures:
+            raise CapabilityError(ErrorCode.DEPENDENCY_MISSING, capability,
+                                  "No available provider; extensions may be missing or disabled.")
+        first = failures[0]
+        if len(failures) == 1:
+            raise first
+        summary = "; ".join(f"{error.extension_id}: {error.code.value} ({error.user_message})"
+                            for error in failures)
+        raise CapabilityError(first.code, capability, summary, extension_id=first.extension_id,
+                              side_effect_uncertain=any(error.side_effect_uncertain
+                                                        for error in failures))
 
-        try:
-            response = self.registry.execute(CapabilityKind.REASONING, complete)
-        except CapabilityError as error:
-            self._reasoning_failure = error
-            raise
-        self.model = response.model
-        return response
-
-    def _extract(self, prompt, max_tokens):
+    def _extract(self, prompt, max_tokens, notices, on_notice):
         request = CompletionRequest(
             (ChatMessage("user", prompt),), TurnMode.TASK,
             model=self.model, temperature=0, max_tokens=max_tokens,
         )
-        return self._complete(request).text
+        return self._complete(request, notices, on_notice).text
 
     def _error(self, error, *, memory_command=False):
         if (error.capability == CapabilityKind.NAVIGATION
@@ -156,14 +235,18 @@ class SessionOrchestrator:
     def _recall(self, query):
         try:
             _recover_failed(self.registry, CapabilityKind.MEMORY)
-            return self.registry.execute(CapabilityKind.MEMORY, lambda port: port.recall(query)), ()
+            items = self.registry.execute(
+                CapabilityKind.MEMORY,
+                lambda port: port.recall(query) if self._memory_read_available(port) else (),
+            )
+            return items, ()
         except CapabilityError as error:
             return (), (f"Memoria no disponible para este turno. {self._error(error).text}",)
 
     def status(self):
         """Refresh only lazy local resolution/probes, never execute a capability."""
         for row in self.registry.diagnostics():
-            if row.state == ExtensionState.ADMITTED:
+            if row.state == ExtensionState.ADMITTED and row.capability != CapabilityKind.REASONING:
                 try:
                     self.registry.resolve(row.capability)
                 except CapabilityError:
@@ -174,13 +257,13 @@ class SessionOrchestrator:
             enabled = compatible and row.state != ExtensionState.DISABLED
             available = ("yes" if row.state == ExtensionState.READY else
                          "limited" if row.state == ExtensionState.DEGRADED else "no")
-            model = (self.model or self._configured_models.get(row.extension_id, "-")
-                     if row.active and row.capability == CapabilityKind.REASONING
-                     else self._configured_models.get(row.extension_id, "-"))
+            reasoning = row.capability == CapabilityKind.REASONING
+            active = row.active and (not reasoning or row.extension_id == self._reasoning_provider)
+            model = (self.model if active and reasoning else self._configured_models.get(row.extension_id, "-"))
             lines.append(
                 f"{row.extension_id} | yes | {'yes' if enabled else 'no'} | "
                 f"{'yes' if compatible else 'no'} | {available} | "
-                f"{row.state.name} | {'yes' if row.active else 'no'} | {model}"
+                f"{row.state.name} | {'yes' if active else 'no'} | {model}"
                 + (f" | {row.reason}" if row.reason else "")
             )
         lines.append(f"Active model (last confirmed): {self.model or 'not confirmed'}")
@@ -247,7 +330,7 @@ class SessionOrchestrator:
         except CapabilityError as error:
             return self._error(error)
 
-    def handle_text(self, text):
+    def handle_text(self, text, *, on_reasoning_notice=None):
         text = text.strip()
         if text.lower() in {"salir", "exit", "quit"}:
             return SessionResult("Hasta luego.", kind="exit")
@@ -270,20 +353,25 @@ class SessionOrchestrator:
                 return SessionResult(result.text, kind="navigation", url=result.url)
             except CapabilityError as error:
                 return self._error(error)
+        reasoning_notices = []
         try:
-            command = self._memory_command(text, self._extract, self._store)
+            command = self._memory_command(
+                text,
+                lambda prompt, budget: self._extract(prompt, budget, reasoning_notices, on_reasoning_notice),
+                self._store,
+            )
             if command:
                 if command.startswith("Hubo un error"):
-                    return SessionResult(command, kind="error")
+                    return SessionResult(command, kind="error", notices=tuple(reasoning_notices))
                 # No prompt reload or secondary read after a committed mutation:
                 # a read failure must never obscure a successful write.
                 self.messages = [self.messages[0], *self.messages[1:],
                                  ChatMessage("user", text), ChatMessage("assistant", command)]
                 self.messages = [self.messages[0], *self.messages[-10:]] if len(self.messages) > 11 else self.messages
                 self._reload_prompt = True
-                return SessionResult(command, kind="memory", mode="task")
+                return SessionResult(command, kind="memory", mode="task", notices=tuple(reasoning_notices))
         except CapabilityError as error:
-            return self._error(error, memory_command=True)
+            return replace(self._error(error, memory_command=True), notices=tuple(reasoning_notices))
         items, notices = self._recall(text)
         prompt = self._prompt(items, reload=self._reload_prompt)
         self._reload_prompt = False
@@ -297,14 +385,8 @@ class SessionOrchestrator:
             mode["temperature"], mode["max_tokens"],
         )
         try:
-            try:
-                response = self._complete(request)
-            except CapabilityError as error:
-                if error.code not in (ErrorCode.EMPTY_RESPONSE, ErrorCode.INCOMPLETE_RESPONSE):
-                    raise
-                response = self._complete(replace(
-                    request, max_tokens=request.max_tokens * 3, mode=TurnMode.TASK), retry=True)
+            response = self._complete(request, reasoning_notices, on_reasoning_notice)
         except CapabilityError as error:
-            return self._error(error)
+            return replace(self._error(error), notices=(*notices, *reasoning_notices))
         self.messages = [*turn, ChatMessage("assistant", response.text)]
-        return SessionResult(response.text, mode=mode["mode"], notices=notices)
+        return SessionResult(response.text, mode=mode["mode"], notices=(*notices, *reasoning_notices))

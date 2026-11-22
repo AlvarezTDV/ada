@@ -4,6 +4,7 @@ import sys
 import json
 import unicodedata
 import argparse
+from pathlib import Path
 
 # Suprimir el banner de pygame antes de importarlo
 os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "hide"
@@ -21,8 +22,9 @@ from ada_core import (
     CapabilityError, CapabilityKind, ErrorCode, ExtensionRegistry, SessionOrchestrator,
 )
 from ada_adapters import (
-    GroqChainReasoningAdapter, OllamaReasoningAdapter, register_default_adapters,
+    GroqChainReasoningAdapter, OllamaReasoningAdapter, SqliteMemoryAdapter, register_default_adapters,
 )
+from ada_adapters.reasoning_adapters import missing_reasoning_env
 
 
 def VoiceEngine(*args, **kwargs):
@@ -352,9 +354,13 @@ def create_session(provider="groq", registry=None):
             registry, provider=provider, voice_factory=lambda: VoiceEngine(mode="edge"),
             browser_runner=lambda *args, **kwargs: run_browser_task(*args, **kwargs),
         )
-        inactive = OllamaReasoningAdapter if provider == "groq" else GroqChainReasoningAdapter
-        registry.register(inactive.manifest, inactive)
-        registry.disable(inactive.manifest.extension_id)
+    else:
+        defaults = {"groq": GroqChainReasoningAdapter.manifest.extension_id,
+                    "local": OllamaReasoningAdapter.manifest.extension_id}
+        current, enabled = registry.provider_catalog(CapabilityKind.REASONING)
+        if (current is not None and current.extension_id in defaults.values()
+                and any(entry.extension_id == defaults[provider] for entry in enabled)):
+            registry.set_preferred_provider(CapabilityKind.REASONING, defaults[provider])
 
     def prompt_factory(items, *, reload=False):
         context = memory._format_memories(
@@ -363,11 +369,22 @@ def create_session(provider="groq", registry=None):
         )
         return get_system_prompt(reload=reload, memory_context=context)
 
+    def memory_read_available(port):
+        # Recall must not initialize SQLite before a successful reasoning turn.
+        if isinstance(port, SqliteMemoryAdapter):
+            try:
+                return Path(memory.DB_PATH).stat().st_size > 0
+            except FileNotFoundError:
+                return False
+        return True
+
     return SessionOrchestrator(
         registry, prompt_factory=prompt_factory, classify_input=classify_input_mode,
         memory_command=lambda text, complete, store: execute_memory_command(
             text, complete=complete, store=store),
         navigation_validator=_validate_navigation_url,
+        missing_reasoning_env=missing_reasoning_env,
+        memory_read_available=memory_read_available,
         configured_models={
             "reasoning.groq": get_groq_model_chain()[0],
             "reasoning.ollama_local": (os.getenv("ADA_LOCAL_MODEL") or DEFAULT_LOCAL_MODEL).strip(),
@@ -417,9 +434,16 @@ def _chat_session(session, keyboard, speech_enabled):
             if not user_input:
                 continue
 
-            result = session.handle_text(user_input)
-            for notice in result.notices:
+            shown_notices = []
+
+            def show_reasoning_notice(notice):
                 console.print(Text(notice, style="yellow"))
+                shown_notices.append(notice)
+
+            result = session.handle_text(user_input, on_reasoning_notice=show_reasoning_notice)
+            for notice in result.notices:
+                if notice not in shown_notices:
+                    console.print(Text(notice, style="yellow"))
             if result.kind in {"error", "status"}:
                 console.print(Text(result.text, style="red" if result.kind == "error" else None))
             elif result.kind == "navigation":
@@ -452,7 +476,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--speak", action="store_true",
                         help="Activar respuestas habladas (Edge TTS online con respaldo local).")
     parser.add_argument("--provider", choices=["groq", "local"], default="groq",
-                        help="Proveedor de conversación: groq (por defecto) o local (Ollama).")
+                        help="Proveedor inicial: groq (por defecto) o local (Ollama).")
     return parser
 
 

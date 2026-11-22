@@ -205,6 +205,24 @@ class AdapterConformanceTests(unittest.TestCase):
                 GroqChainReasoningAdapter().complete(CompletionRequest(()))
         self.assertEqual(caught.exception.code, ErrorCode.AUTH_INVALID)
 
+    def test_default_reasoning_catalog_keeps_both_providers_enabled_and_prefers_the_requested_one(self):
+        from ada_adapters import register_default_adapters
+
+        for provider, adapter_type in (("groq", GroqChainReasoningAdapter),
+                                       ("local", OllamaReasoningAdapter)):
+            with self.subTest(provider=provider):
+                registry = ExtensionRegistry()
+                register_default_adapters(registry, provider=provider)
+                reasoning = [row for row in registry.diagnostics()
+                             if row.capability == CapabilityKind.REASONING]
+                self.assertEqual([(row.extension_id, row.state) for row in reasoning], [
+                    ("reasoning.groq", ExtensionState.ADMITTED),
+                    ("reasoning.ollama_local", ExtensionState.ADMITTED),
+                ])
+                with patch.object(ada, "get_client") as get_client:
+                    self.assertIsInstance(registry.resolve(CapabilityKind.REASONING), adapter_type)
+                get_client.assert_not_called()
+
 
 class VoiceAndBrowserAdapterConformanceTests(unittest.TestCase):
     def test_registering_and_probing_voice_and_browser_adapters_never_imports_audio_or_browser_packages(self):
@@ -230,7 +248,7 @@ class VoiceAndBrowserAdapterConformanceTests(unittest.TestCase):
             registry = ExtensionRegistry()
             adapters.register_default_adapters(registry)
             self.assertEqual({d.extension_id for d in registry.diagnostics()}, {
-                "reasoning.groq", "memory.sqlite", "stt.faster_whisper",
+                "reasoning.groq", "reasoning.ollama_local", "memory.sqlite", "stt.faster_whisper",
                 "tts.edge_with_local_fallback", "navigation.browser_use_edge",
             })
             worker.assert_not_called()

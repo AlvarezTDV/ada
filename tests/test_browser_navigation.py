@@ -37,10 +37,14 @@ class NavigationTests(unittest.TestCase):
 
     def test_worker_environment_excludes_credentials_and_cloud_configuration(self):
         with patch.dict(navigation.os.environ, {"OPENAI_API_KEY": "private",
+                                               "GROQ_API_KEY": "gsk_private",
+                                               "FUTURE_PROVIDER_TOKEN": "private",
                                                "HTTP_PROXY": "private",
                                                "BROWSER_USE_API_KEY": "private"}):
             env = navigation.worker_environment(Path("job"))
         self.assertNotIn("OPENAI_API_KEY", env)
+        self.assertNotIn("GROQ_API_KEY", env)
+        self.assertNotIn("FUTURE_PROVIDER_TOKEN", env)
         self.assertNotIn("HTTP_PROXY", env)
         self.assertNotIn("BROWSER_USE_API_KEY", env)
         self.assertEqual(env["ANONYMIZED_TELEMETRY"], "false")
@@ -61,6 +65,43 @@ class NavigationTests(unittest.TestCase):
         self.assertEqual(process.communicate.call_args.kwargs["timeout"], navigation.TIMEOUT_SECONDS)
         payload = json.loads(process.communicate.call_args.kwargs["input"])
         self.assertEqual(set(payload), {"url", "task"})
+
+    def test_observation_worker_receives_only_url_and_returns_bounded_page(self):
+        page = {"url": "https://example.com/redirected", "title": "Title",
+                "language": "es", "text": "ñ" * 20_010, "other": "never disclose"}
+        process = Mock(returncode=0)
+        process.communicate.return_value = (
+            json.dumps({"ok": True, "observation": page}).encode(), None,
+        )
+        with patch.object(navigation, "worker_python", return_value=Path(sys.executable)), \
+             patch.object(navigation, "worker_job", return_value=nullcontext()), \
+             patch.object(navigation.subprocess, "Popen", return_value=process) as launch:
+            observation = navigation.observe_page("https://example.com")
+        launch.assert_called_once()
+        self.assertEqual(json.loads(process.communicate.call_args.kwargs["input"]),
+                         {"url": "https://example.com"})
+        self.assertEqual(observation, {**{k: page[k] for k in ("url", "title", "language")},
+                                       "text": "ñ" * 20_000})
+
+    def test_observation_worker_refuses_foreign_pages_or_reports_terminal_failure(self):
+        cases = (
+            (0, {"ok": True, "observation": {
+                "url": "https://elsewhere.example", "title": "Title", "language": "en", "text": "x",
+            }}, "permission_denied"),
+            (1, {"ok": False, "error": "permission_denied"}, "permission_denied"),
+            (1, {"ok": False, "error": "dependency_missing"}, "dependency_missing"),
+            (1, {"ok": False}, "browser_failed"),
+        )
+        for status, payload, code in cases:
+            process = Mock(returncode=status)
+            process.communicate.return_value = (json.dumps(payload).encode(), None)
+            with self.subTest(code=code), \
+                 patch.object(navigation, "worker_python", return_value=Path(sys.executable)), \
+                 patch.object(navigation, "worker_job", return_value=nullcontext()), \
+                 patch.object(navigation.subprocess, "Popen", return_value=process):
+                with self.assertRaises(navigation.BrowserError) as caught:
+                    navigation.observe_page("https://example.com")
+                self.assertEqual(caught.exception.code, code)
 
     def test_invalid_tasks_and_missing_environment_never_launch_worker(self):
         with patch.object(navigation.subprocess, "Popen") as launch:
@@ -295,26 +336,37 @@ class NavigationRoutingTests(IsolatedPromptFixture):
         before = hashlib.sha256(Path(ada.memory.DB_PATH).read_bytes()).digest()
         output = io.StringIO()
         client = Mock()
-        client.chat.completions.create.return_value = SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content="normal answer"), finish_reason="stop")])
         literal = "[bold]untrusted page result[/bold]"
-        result = navigation.BrowserResult(literal, "https://example.com")
-        with patch.object(ada, "get_client", return_value=(client, "test")), \
+        result = {"url": "https://example.com", "title": literal, "language": "en", "text": "Page text"}
+        client.chat.completions.create.side_effect = [
+            SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=text),
+                                                     finish_reason="stop")])
+            for text in ("normal answer", json.dumps({"answer": literal}), "normal answer")
+        ]
+        with patch.dict(navigation.os.environ, {"GROQ_API_KEY": "gsk_fixture"}), \
+             patch.object(ada, "get_client", return_value=(client, "test")), \
              patch.object(ada, "get_system_prompt", return_value="system"), \
              patch.object(ada, "print_header"), \
              patch.object(ada, "console", Console(file=output, force_terminal=False, width=160)), \
              patch.object(ada, "VoiceEngine") as voice, \
              patch("ada_adapters.browser_navigation_adapter.BrowserUseNavigationAdapter.probe") as probe, \
-             patch.object(ada, "run_browser_task", return_value=result) as run, \
+             patch.object(navigation, "observe_page", return_value=result) as run, \
              patch("builtins.input", side_effect=["hola", "/navegar https://example.com Read title", "continue", "salir"]):
             from ada_core import ExtensionState, HealthReport
             probe.return_value = HealthReport(ExtensionState.READY)
             ada.chat_loop()
-        run.assert_called_once_with("https://example.com", "Read title")
+        run.assert_called_once_with("https://example.com")
         self.assertIn(literal, output.getvalue())
-        self.assertEqual(client.chat.completions.create.call_count, 2)
-        self.assertNotIn(literal, str(client.chat.completions.create.call_args))
-        self.assertNotIn("Read title", str(client.chat.completions.create.call_args))
+        self.assertIn("Navegación", output.getvalue())
+        self.assertNotIn("Navegación local", output.getvalue())
+        calls = client.chat.completions.create.call_args_list
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(json.loads(calls[1].kwargs["messages"][-1]["content"]),
+                         {"task": "Read title", "observation": result})
+        for call in (calls[0], calls[2]):
+            self.assertNotIn(literal, str(call))
+            self.assertNotIn("Read title", str(call))
+            self.assertNotIn("timeout", call.kwargs)
         voice.return_value.speak.assert_not_called()
         self.assertEqual(hashlib.sha256(Path(ada.memory.DB_PATH).read_bytes()).digest(), before)
 
@@ -325,7 +377,7 @@ class NavigationRoutingTests(IsolatedPromptFixture):
              patch.object(ada, "print_header"), patch.object(ada, "console"), \
              patch.object(ada, "VoiceEngine"), \
              patch("ada_adapters.browser_navigation_adapter.BrowserUseNavigationAdapter.probe") as probe, \
-             patch.object(ada, "run_browser_task", side_effect=navigation.BrowserError("Safe failure")) as run, \
+             patch.object(navigation, "observe_page", side_effect=navigation.BrowserError("Safe failure")) as run, \
              patch("builtins.input", side_effect=["/navegar", "/navegar https://example.com",
                                                 "/navegar https://example.com Read", "salir"]):
             from ada_core import ExtensionState, HealthReport

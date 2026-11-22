@@ -2,12 +2,50 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 import browser_worker as worker
 
+
+class ObservationWorkerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_one_page_read_does_not_construct_a_model_and_always_closes_edge(self):
+        url = "https://example.com"
+        for failure in (None, OSError("page load failed"), "https://other.example/"):
+            with self.subTest(failure=failure):
+                page = Mock(goto=AsyncMock(side_effect=failure if isinstance(failure, Exception) else None),
+                            evaluate=AsyncMock(return_value={
+                                "url": failure if isinstance(failure, str) else url,
+                                "title": "T" * 2_001, "language": "l" * 65, "text": "contents",
+                            }))
+                browser = Mock(start=AsyncMock(), get_current_page=AsyncMock(return_value=page),
+                               kill=AsyncMock())
+                browser_sdk = SimpleNamespace(Browser=Mock(return_value=browser))
+                with patch.dict(sys.modules, {"browser_use": browser_sdk}), \
+                     patch.object(worker, "edge_executable", return_value=Path("edge.exe")), \
+                     patch.object(worker, "edge_profile", return_value=Path("profile")), \
+                     patch("browser_navigation.socket.getaddrinfo", return_value=[
+                         (2, 1, 6, "", ("93.184.216.34", 443)),
+                     ]):
+                    if failure is None:
+                        result = await worker.observe(url)
+                        self.assertEqual(result["observation"], {
+                            "url": url, "title": "T" * 2_000, "language": "l" * 64, "text": "contents",
+                        })
+                    else:
+                        with self.assertRaises(OSError if isinstance(failure, Exception) else worker.BrowserError):
+                            await worker.observe(url)
+                browser_sdk.Browser.assert_called_once()
+                browser.start.assert_awaited_once()
+                browser.kill.assert_awaited_once()
+                if isinstance(failure, Exception):
+                    page.evaluate.assert_not_awaited()
+                else:
+                    page.evaluate.assert_awaited_once()
+                self.assertEqual(sum(call.args == (url,) for call in page.goto.await_args_list), 1)
 
 @unittest.skipUnless(importlib.util.find_spec("browser_use"), "optional isolated Browser Use environment")
 class WorkerConfigurationTests(unittest.IsolatedAsyncioTestCase):
@@ -33,7 +71,7 @@ class WorkerConfigurationTests(unittest.IsolatedAsyncioTestCase):
         for native in (False, True):
             for url in ("https://example.com/page", "https://other.example/page", "http://127.0.0.1",
                         "https://@example.com/", "https://:@example.com/"):
-                snapshot = {"url": url, "title": "Observed title", "language": "en", "text": "Observed text"}
+                snapshot = {"url": url, "title": "T" * 2_001, "language": "l" * 65, "text": "Observed text"}
                 raw = snapshot if native else json.dumps(snapshot)
                 page = Mock(evaluate=AsyncMock(return_value=raw), goto=AsyncMock())
                 session = Mock(get_current_page=AsyncMock(return_value=page))

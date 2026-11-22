@@ -22,10 +22,20 @@ from ada_core.registry import _interruptible_resource
 ROOT = Path(__file__).resolve().parent
 TIMEOUT_SECONDS = 180
 MAX_OUTPUT = 40_000
+MAX_PAGE_TEXT = 20_000
+URL_POLICY_MESSAGE = "Usa una URL HTTPS pública, sin credenciales y del dominio autorizado."
+WORKER_MISSING_MESSAGE = "Prepara .venv-browser e instala requirements-browser.txt; consulta README."
+EDGE_MISSING_MESSAGE = "Microsoft Edge no está instalado en una ubicación compatible."
+WORKER_TIMEOUT_MESSAGE = "La navegación agotó su tiempo y se detuvo; no se reintentó."
+PAGE_FAILED_MESSAGE = "No se pudo abrir o leer la página en Edge; no se reintentó."
 
 
 class BrowserError(Exception):
     """Safe user-facing failure, never raw browser/model diagnostics."""
+
+    def __init__(self, message, *, code="browser_failed"):
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -56,7 +66,21 @@ def validate_url(url: str, *, host: str | None = None, resolve: bool = False) ->
                 raise ValueError
         return name
     except (ValueError, OSError):
-        raise BrowserError("Usa una URL HTTPS pública, sin credenciales y del dominio autorizado.") from None
+        raise BrowserError(URL_POLICY_MESSAGE, code="permission_denied") from None
+
+
+def validate_observation(data, *, host: str) -> dict[str, str]:
+    fields = ("url", "title", "language", "text")
+    if not isinstance(data, dict) or any(not isinstance(data.get(key), str) for key in fields):
+        raise ValueError("Invalid page observation")
+    validate_url(data["url"], host=host)
+    return data
+
+
+def bounded_observation(data, *, host: str) -> dict[str, str]:
+    data = validate_observation(data, host=host)
+    return {"url": data["url"], "title": data["title"][:2000],
+            "language": data["language"][:64], "text": data["text"][:MAX_PAGE_TEXT]}
 
 
 def validate_text(text: str) -> str:
@@ -69,7 +93,7 @@ def validate_text(text: str) -> str:
 def worker_python() -> Path:
     executable = ROOT / ".venv-browser" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     if not executable.is_file():
-        raise BrowserError("Prepara .venv-browser e instala requirements-browser.txt; consulta README.")
+        raise BrowserError(WORKER_MISSING_MESSAGE, code="dependency_missing")
     return executable
 
 
@@ -202,31 +226,60 @@ def _browser_process(executable, job):
         yield process, stop
 
 
-def run_task(url: str, task: str) -> BrowserResult:
-    host = validate_url(url)
+def validate_task(task: str):
     if not task.strip() or len(task) > 4000:
         raise BrowserError("Usa /navegar <https-url> <tarea de lectura> (máximo 4000 caracteres).")
+
+
+def _run_worker(payload):
     executable = worker_python()
     with tempfile.TemporaryDirectory(prefix="ada-browser-job-") as directory:
         with _interruptible_resource(_browser_process(executable, Path(directory))) as (process, stop):
             try:
-                output, _ = process.communicate(input=json.dumps({"url": url, "task": task}).encode(),
+                output, _ = process.communicate(input=json.dumps(payload).encode(),
                                                 timeout=TIMEOUT_SECONDS)
             except (subprocess.TimeoutExpired, KeyboardInterrupt) as error:
                 stop()
                 if isinstance(error, KeyboardInterrupt):
                     raise
-                raise BrowserError("La navegación agotó su tiempo y se detuvo; no se reintentó.") from None
+                raise BrowserError(WORKER_TIMEOUT_MESSAGE, code="timeout") from None
         try:
-            data = json.loads(output) if len(output) <= MAX_OUTPUT * 8 else {}
-            if isinstance(data, dict) and data.get("error") == "model_task_failed":
-                raise BrowserError("El modelo local no completó la tarea. Comprueba ADA_BROWSER_MODEL; no se mostró una respuesta fallida.")
-            if process.returncode or data.get("ok") is not True:
-                raise ValueError
+            data = json.loads(output) if len(output) <= MAX_OUTPUT * 8 else None
+        except ValueError:
+            data = None
+        return process.returncode, data if isinstance(data, dict) else {}
+
+
+def observe_page(url: str) -> dict[str, str]:
+    """Read one public page in the isolated worker, without a task or model."""
+    host = validate_url(url)
+    status, data = _run_worker({"url": url})
+    if not status and data.get("ok") is True:
+        try:
+            return bounded_observation(data.get("observation"), host=host)
+        except ValueError:
+            pass
+    elif data.get("error") == "permission_denied":
+        raise BrowserError(URL_POLICY_MESSAGE, code="permission_denied")
+    elif data.get("error") == "dependency_missing":
+        raise BrowserError(EDGE_MISSING_MESSAGE, code="dependency_missing")
+    raise BrowserError(PAGE_FAILED_MESSAGE)
+
+
+def run_task(url: str, task: str) -> BrowserResult:
+    """Standalone legacy CLI; the ADA session uses observe_page instead."""
+    host = validate_url(url)
+    validate_task(task)
+    status, data = _run_worker({"url": url, "task": task})
+    if data.get("error") == "model_task_failed":
+        raise BrowserError("El modelo local no completó la tarea. Comprueba ADA_BROWSER_MODEL; no se mostró una respuesta fallida.")
+    if not status and data.get("ok") is True:
+        try:
             validate_url(data["url"], host=host)
             return BrowserResult(validate_text(data["text"]), data["url"])
         except (ValueError, KeyError, TypeError, AttributeError):
-            raise BrowserError("La tarea local no se completó. Comprueba Edge y Ollama; no se reintentó.") from None
+            pass
+    raise BrowserError("La tarea local no se completó. Comprueba Edge y Ollama; no se reintentó.")
 
 
 def main():

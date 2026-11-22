@@ -2,6 +2,7 @@
 
 import gc
 import builtins
+from dataclasses import replace
 import hashlib
 import importlib
 import json
@@ -22,12 +23,12 @@ from test_memory_prompt import ada
 from ada_core import (
     CapabilityError, CapabilityKind, ChatMessage, CompletionRequest,
     CompletionResponse, ErrorCode, ExtensionManifest, MemoryItem, MemoryPort,
-    ExecutionModel, ExtensionRegistry, ExtensionState, ReasoningPort,
+    ExecutionModel, ExtensionRegistry, ExtensionState, HealthReport, ReasoningPort,
     SpeechInputPort, SpeechOutputPort, SpeechOutputReport, TurnMode,
     WebNavigationPort, WebNavigationRequest, WebNavigationResponse,
 )
 from ada_adapters import (
-    GroqChainReasoningAdapter, OllamaReasoningAdapter, SqliteMemoryAdapter,
+    BrowserUseNavigationAdapter, GroqChainReasoningAdapter, OllamaReasoningAdapter, SqliteMemoryAdapter,
 )
 import memory
 import browser_navigation
@@ -222,6 +223,197 @@ class AdapterConformanceTests(unittest.TestCase):
                 with patch.object(ada, "get_client") as get_client:
                     self.assertIsInstance(registry.resolve(CapabilityKind.REASONING), adapter_type)
                 get_client.assert_not_called()
+
+
+    def make_session(self, local, groq, third):
+        registry = ExtensionRegistry()
+        for priority, provider in zip((30, 20, 10), (local, groq, third)):
+            registry.register(provider.manifest, lambda provider=provider: provider, priority=priority)
+        registry.register(BrowserUseNavigationAdapter.manifest, BrowserUseNavigationAdapter,
+                          probe=lambda: HealthReport(ExtensionState.READY))
+        return ada.create_session("local", registry, per_provider_timeout=10, clock=lambda: self.now)
+
+    def navigation_providers(self):
+        self.now = 100
+        self.page = {"url": "https://example.com/current", "title": "Title",
+                     "language": "en", "text": "x" * 20_005, "private": "not a page field"}
+        local = Mock(spec=ReasoningPort, manifest=OllamaReasoningAdapter.manifest)
+        third = Mock(spec=ReasoningPort, manifest=replace(
+            OllamaReasoningAdapter.manifest, extension_id="reasoning.third"))
+        third.complete.return_value = CompletionResponse('{"answer":"third answer"}', "third-model")
+        return local, third
+
+    def test_backup_gets_fresh_deadline_and_notice_before_bounded_payload(self):
+        local, third = self.navigation_providers()
+        groq, _ = self.make_adapter(GroqChainReasoningAdapter, [])
+        events, notices = [], []
+
+        def slow_local(_request):
+            events.append("local")
+            self.now += 10
+            return CompletionResponse('{"answer":"late"}', "local-model")
+
+        def cloud(**kwargs):
+            events.append("cloud")
+            self.assertEqual(kwargs["timeout"], 10)
+            expected = {key: self.page[key] for key in ("url", "title", "language")}
+            expected["text"] = "x" * 20_000
+            self.assertEqual(json.loads(kwargs["messages"][-1]["content"]),
+                             {"task": "Summarize", "observation": expected})
+            self.assertNotIn("private chat", str(kwargs["messages"]))
+            self.assertNotIn("gsk_conformance", str(kwargs))
+            self.now += 9
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content='{"answer":"from cloud"}'), finish_reason="stop")])
+
+        def notice(message):
+            notices.append(message)
+            events.append("notice")
+
+        local.complete.side_effect = slow_local
+        session = self.make_session(local, groq, third)
+        session.messages.append(ChatMessage("user", "private chat"))
+        with patch.object(browser_navigation, "observe_page", return_value=self.page) as observe, \
+             patch.object(groq._client.chat.completions, "create", side_effect=cloud), \
+             patch.object(session.registry, "execute", wraps=session.registry.execute) as execute:
+            result = session.handle_text("/navegar https://example.com Summarize", on_reasoning_notice=notice)
+        self.assertEqual((result.kind, result.text, result.url), ("navigation", "from cloud", self.page["url"]))
+        self.assertEqual(events, ["local", "notice", "cloud"])
+        self.assertEqual(result.notices, tuple(notices))
+        self.assertIn("nube", notices[0])
+        self.assertIn("página", notices[0])
+        observe.assert_called_once_with("https://example.com")
+        third.complete.assert_not_called()
+        navigation_call = next(call for call in execute.call_args_list if call.args[0] == CapabilityKind.NAVIGATION)
+        self.assertGreaterEqual(navigation_call.kwargs["timeout_s"], browser_navigation.TIMEOUT_SECONDS + 30)
+        self.assertEqual(session.registry.provider_catalog(CapabilityKind.REASONING)[0].extension_id,
+                         "reasoning.groq")
+
+    def test_model_rotation_is_inside_one_attempt_then_third_provider_becomes_active(self):
+        for exhaust_clock in (False, True):
+            with self.subTest(exhaust_clock=exhaust_clock):
+                local, third = self.navigation_providers()
+                local.complete.return_value = CompletionResponse('{"error":"model_task_failed"}', "local-model")
+                groq, calls = self.make_adapter(GroqChainReasoningAdapter, [(429, None, None)] * 3)
+                session = self.make_session(local, groq, third)
+                create = groq._client.chat.completions.create
+                timeouts = []
+
+                def spend_time(**kwargs):
+                    timeouts.append(kwargs.get("timeout"))
+                    self.now += 6 if exhaust_clock else 2
+                    return create(**kwargs)
+
+                with patch.object(browser_navigation, "observe_page", return_value=self.page) as observe, \
+                     patch.object(groq._client.chat.completions, "create", side_effect=spend_time), \
+                     patch.object(ada.console, "print"):
+                    result = session.handle_text("/navegar https://example.com Read")
+                    again = session.handle_text("/navegar https://example.com Read again")
+                self.assertEqual((result.kind, result.text, again.text), ("navigation", "third answer", "third answer"))
+                expected_timeouts = [10, 4] if exhaust_clock else [10, 8, 6]
+                self.assertEqual(timeouts, expected_timeouts)
+                self.assertEqual([body["model"] for _, body in calls], CHAIN.split(",")[:len(expected_timeouts)])
+                self.assertEqual(session.registry.provider_catalog(CapabilityKind.REASONING)[0].extension_id,
+                                 "reasoning.third")
+                self.assertEqual(session.model, "third-model")
+                self.assertEqual(observe.call_count, 2)
+                local.complete.assert_called_once()
+                self.assertEqual(third.complete.call_count, 2)
+
+    def test_missing_cloud_credentials_skip_disclosure_and_attempt(self):
+        local, third = self.navigation_providers()
+        local.complete.return_value = CompletionResponse("not JSON", "local-model")
+        groq, calls = self.make_adapter(GroqChainReasoningAdapter, [])
+        notice = Mock()
+        with patch.dict(os.environ, {"GROQ_API_KEY": " "}), \
+             patch.object(browser_navigation, "observe_page", return_value=self.page):
+            session = self.make_session(local, groq, third)
+            result = session.handle_text("/navegar https://example.com Read", on_reasoning_notice=notice)
+        self.assertEqual((result.kind, result.text, result.notices), ("navigation", "third answer", ()))
+        self.assertEqual(calls, [])
+        notice.assert_not_called()
+
+    def test_navigation_without_callback_emits_notice_before_cloud_send(self):
+        local, third = self.navigation_providers()
+        local.complete.return_value = CompletionResponse("not JSON", "local-model")
+        groq, _ = self.make_adapter(GroqChainReasoningAdapter, [])
+        session = self.make_session(local, groq, third)
+        events = []
+
+        def cloud(**_kwargs):
+            events.append("send")
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content='{"answer":"from cloud"}'), finish_reason="stop")])
+
+        with patch.object(browser_navigation, "observe_page", return_value=self.page), \
+             patch.object(groq._client.chat.completions, "create", side_effect=cloud), \
+             patch.object(ada.console, "print", side_effect=lambda message: events.append(str(message))):
+            result = session.handle_text("/navegar https://example.com Read")
+        self.assertEqual((result.kind, result.text), ("navigation", "from cloud"))
+        self.assertEqual(events, [*result.notices, "send"])
+        self.assertEqual(len(result.notices), 1)
+
+    def test_navigation_without_notice_sink_skips_cloud(self):
+        local, third = self.navigation_providers()
+        local.complete.return_value = CompletionResponse("not JSON", "local-model")
+        groq, calls = self.make_adapter(GroqChainReasoningAdapter, [])
+        session = self.make_session(local, groq, third)
+        with patch.object(session, "_navigation_notice", None), \
+             patch.object(browser_navigation, "observe_page", return_value=self.page):
+            result = session.handle_text("/navegar https://example.com Read")
+        self.assertEqual((result.kind, result.text, result.notices), ("navigation", "third answer", ()))
+        self.assertEqual(calls, [])
+        third.complete.assert_called_once()
+
+    def test_terminal_browser_or_provider_interrupt_does_not_start_a_backup(self):
+        local, third = self.navigation_providers()
+        groq, calls = self.make_adapter(GroqChainReasoningAdapter, [])
+        session = self.make_session(local, groq, third)
+        with patch.object(browser_navigation, "observe_page") as observe:
+            denied = session.handle_text("/navegar https://127.0.0.1 Read")
+            self.assertEqual(denied.kind, "error")
+            self.assertIn("dominio autorizado", denied.text)
+            observe.assert_not_called()
+            for failure in (
+                KeyboardInterrupt(),
+                browser_navigation.BrowserError("DNS rechazado", code="permission_denied"),
+                browser_navigation.BrowserError("Microsoft Edge no está instalado", code="dependency_missing"),
+                browser_navigation.BrowserError("No se pudo cargar la página"),
+            ):
+                observe.side_effect = failure
+                session = self.make_session(local, groq, third)
+                if isinstance(failure, KeyboardInterrupt):
+                    with self.assertRaises(KeyboardInterrupt):
+                        session.handle_text("/navegar https://example.com Read")
+                else:
+                    result = session.handle_text("/navegar https://example.com Read")
+                    self.assertEqual(result.kind, "error")
+                    self.assertIn(str(failure), result.text)
+            local.complete.assert_not_called()
+            observe.side_effect = None
+            observe.return_value = self.page
+            local.complete.side_effect = KeyboardInterrupt
+            session = self.make_session(local, groq, third)
+            with self.assertRaises(KeyboardInterrupt):
+                session.handle_text("/navegar https://example.com Read")
+        self.assertEqual(calls, [])
+        third.complete.assert_not_called()
+
+    def test_all_failures_keep_concrete_provider_causes(self):
+        local, third = self.navigation_providers()
+        local.complete.side_effect = CapabilityError(
+            ErrorCode.NETWORK_UNAVAILABLE, CapabilityKind.REASONING, "Ollama is offline")
+        third.complete.return_value = CompletionResponse('{"answer":false}', "third-model")
+        groq, calls = self.make_adapter(GroqChainReasoningAdapter, [(429, None, None)] * 3)
+        session = self.make_session(local, groq, third)
+        with patch.object(browser_navigation, "observe_page", return_value=self.page) as observe, \
+             patch.object(ada.console, "print"):
+            result = session.handle_text("/navegar https://example.com Read")
+        self.assertEqual(result.kind, "error")
+        for cause in ("Ollama is offline", "quota_exceeded", "modelo local", "reasoning.third"):
+            self.assertIn(cause, result.text)
+        self.assertEqual(len(calls), 3)
+        observe.assert_called_once()
 
 
 class VoiceAndBrowserAdapterConformanceTests(unittest.TestCase):

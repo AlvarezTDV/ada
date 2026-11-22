@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+import time
 import json
 import unicodedata
 import argparse
@@ -25,6 +26,7 @@ from ada_adapters import (
     GroqChainReasoningAdapter, OllamaReasoningAdapter, SqliteMemoryAdapter, register_default_adapters,
 )
 from ada_adapters.reasoning_adapters import missing_reasoning_env
+from ada_core.orchestrator import DEFAULT_NAVIGATION_PROVIDER_TIMEOUT, navigation_time_remaining
 
 
 def VoiceEngine(*args, **kwargs):
@@ -33,10 +35,11 @@ def VoiceEngine(*args, **kwargs):
     return engine(*args, **kwargs)
 
 
-def run_browser_task(*args, **kwargs):
-    """Compatibility facade; import the optional browser only on explicit use."""
-    from browser_navigation import run_task
-    return run_task(*args, **kwargs)
+def run_browser_task(url, task):
+    """Prepare the page for a session task; the worker receives only the URL."""
+    from browser_navigation import observe_page, validate_task
+    validate_task(task)
+    return observe_page(url)
 
 
 def _validate_navigation_url(url):
@@ -158,10 +161,17 @@ def create_chat_completion_with_fallback(client, model: str, messages: list, *,
     for index, candidate in enumerate(candidates):
         # A rotated reasoning model also needs room for its internal tokens.
         budget = max(max_tokens, 300) if _is_reasoning_model(candidate) else max_tokens
+        options = _build_completion_kwargs(
+            client, candidate, messages, temperature=temperature, max_tokens=budget, think=think,
+        )
+        remaining = navigation_time_remaining()
+        if remaining is not None:
+            options["timeout"] = remaining
+            if _is_local_client(client, candidate):
+                # Leave room for a 20,000-character observation plus instructions and output.
+                options["extra_body"]["options"]["num_ctx"] = 8192
         try:
-            response = client.chat.completions.create(**_build_completion_kwargs(
-                client, candidate, messages, temperature=temperature,
-                max_tokens=budget, think=think))
+            response = client.chat.completions.create(**options)
             return response, candidate
         except openai.RateLimitError:
             if index + 1 == len(candidates):
@@ -343,16 +353,18 @@ def print_ada_response(text: str, mode: str):
 
 # ─── Bucle Principal ──────────────────────────────────────────────────────────
 
-def create_session(provider="groq", registry=None):
+def create_session(provider="groq", registry=None, *,
+                   per_provider_timeout=DEFAULT_NAVIGATION_PROVIDER_TIMEOUT, clock=time.monotonic):
     """Composition root; retain facade injection points and perform no provider I/O."""
     provider = (provider or os.getenv("ADA_CHAT_PROVIDER") or "groq").strip().lower()
     if provider not in {"groq", "local"}:
         raise ChatConfigError("Proveedor de conversación no válido. Usa --provider groq o --provider local.")
+    navigation_observer = None
     if registry is None:
+        navigation_observer = lambda url, task: run_browser_task(url, task)
         registry = ExtensionRegistry()
         register_default_adapters(
             registry, provider=provider, voice_factory=lambda: VoiceEngine(mode="edge"),
-            browser_runner=lambda *args, **kwargs: run_browser_task(*args, **kwargs),
         )
     else:
         defaults = {"groq": GroqChainReasoningAdapter.manifest.extension_id,
@@ -383,8 +395,11 @@ def create_session(provider="groq", registry=None):
         memory_command=lambda text, complete, store: execute_memory_command(
             text, complete=complete, store=store),
         navigation_validator=_validate_navigation_url,
+        navigation_observer=navigation_observer,
+        navigation_notice=lambda notice: console.print(Text(notice, style="yellow")),
         missing_reasoning_env=missing_reasoning_env,
         memory_read_available=memory_read_available,
+        per_provider_timeout=per_provider_timeout, clock=clock,
         configured_models={
             "reasoning.groq": get_groq_model_chain()[0],
             "reasoning.ollama_local": (os.getenv("ADA_LOCAL_MODEL") or DEFAULT_LOCAL_MODEL).strip(),
@@ -447,7 +462,7 @@ def _chat_session(session, keyboard, speech_enabled):
             if result.kind in {"error", "status"}:
                 console.print(Text(result.text, style="red" if result.kind == "error" else None))
             elif result.kind == "navigation":
-                console.print(Panel(Text(result.text), title="Navegación local",
+                console.print(Panel(Text(result.text), title="Navegación",
                                     border_style="#fd2636", padding=(0, 1)))
                 console.print(Text(result.url))
             else:
@@ -471,8 +486,9 @@ def _chat_session(session, keyboard, speech_enabled):
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="ADA: chat por texto con audio opcional.",
                                      epilog="En el chat: /estado muestra extensiones y modelo activo. "
-                                            "/navegar <https-url> <tarea> usa Browser Use, "
-                                            "Edge y Ollama locales; consulta README para preparar el entorno opcional.")
+                                            "/navegar <https-url> <tarea> lee la página con Edge local y "
+                                            "usa los mismos proveedores de razonamiento del chat. "
+                                            "Consulta README para preparar el entorno opcional.")
     parser.add_argument("--speak", action="store_true",
                         help="Activar respuestas habladas (Edge TTS online con respaldo local).")
     parser.add_argument("--provider", choices=["groq", "local"], default="groq",

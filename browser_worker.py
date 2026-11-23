@@ -7,7 +7,9 @@ import os
 from pathlib import Path
 import sys
 
-from browser_navigation import BrowserError, validate_text, validate_url
+from browser_navigation import (
+    BrowserError, EDGE_MISSING_MESSAGE, bounded_observation, validate_observation, validate_text, validate_url,
+)
 
 SAFE_ACTIONS = {"open_page", "read_page", "done"}
 
@@ -23,7 +25,7 @@ def edge_executable() -> Path:
             path = Path(root) / "Microsoft/Edge/Application/msedge.exe"
             if path.is_file():
                 return path
-    raise BrowserError("Microsoft Edge no está instalado en una ubicación compatible.")
+    raise BrowserError(EDGE_MISSING_MESSAGE, code="dependency_missing")
 
 
 def edge_profile() -> Path:
@@ -56,11 +58,7 @@ def read_tools(host):
             language: document.documentElement.lang,
             text: (document.body?.innerText || '').slice(0, 20000)})""")
         try:
-            snapshot = json.loads(raw) if isinstance(raw, str) else raw
-            if not isinstance(snapshot, dict) or any(not isinstance(snapshot.get(key), str)
-                                                     for key in ("url", "title", "language", "text")):
-                raise ValueError
-            validate_url(snapshot["url"], host=host)
+            snapshot = validate_observation(json.loads(raw) if isinstance(raw, str) else raw, host=host)
         except (ValueError, TypeError, BrowserError):
             # A redirect or focus change must not feed a foreign page to the model.
             try:
@@ -80,17 +78,55 @@ def read_tools(host):
     return tools
 
 
-async def browse(url, task):
-    from browser_use import Agent, Browser, ChatOllama
+async def _read_observation(page, host):
+    raw = await page.evaluate("""() => {
+        const snapshot = () => ({url: location.href, title: document.title.slice(0, 2000),
+            language: document.documentElement.lang.slice(0, 64),
+            text: (document.body?.innerText || '').slice(0, 20000)});
+        return document.readyState === 'loading'
+            ? new Promise(resolve => document.addEventListener(
+                'DOMContentLoaded', () => resolve(snapshot()), {once: true}))
+            : snapshot();
+    }""")
+    return bounded_observation(json.loads(raw) if isinstance(raw, str) else raw, host=host)
 
-    host = await asyncio.to_thread(validate_url, url, resolve=True)
-    browser = Browser(
+
+def _edge_browser(host):
+    from browser_use import Browser
+
+    return Browser(
         executable_path=str(edge_executable()), user_data_dir=str(edge_profile()),
         headless=True, use_cloud=False, keep_alive=False, chromium_sandbox=True,
         allowed_domains=[f"https://{host}"], enable_default_extensions=False,
         accept_downloads=False, auto_download_pdfs=False, permissions=[],
         args=["--disable-sync", "--disable-extensions", "--no-first-run", "--app=about:blank"],
     )
+
+
+async def observe(url):
+    host = await asyncio.to_thread(validate_url, url, resolve=True)
+    browser = _edge_browser(host)
+    try:
+        await browser.start()
+        page = await browser.get_current_page()
+        if page is None:
+            raise BrowserError("Edge no abrió una página.")
+        await page.goto(url)
+        return {"ok": True, "observation": await _read_observation(page, host)}
+    finally:
+        failed = sys.exc_info()[0] is not None
+        try:
+            await asyncio.wait_for(browser.kill(), timeout=15)
+        except Exception:
+            if not failed:
+                raise
+
+
+async def browse(url, task):
+    from browser_use import Agent, ChatOllama
+
+    host = await asyncio.to_thread(validate_url, url, resolve=True)
+    browser = _edge_browser(host)
     try:
         tools = read_tools(host)
         model = ChatOllama(model=os.environ.get("ADA_BROWSER_MODEL", "qwen2.5:3b"),
@@ -123,16 +159,29 @@ def main():
     # These must precede imports: the upstream library can load .env on import.
     os.environ.update({"ANONYMIZED_TELEMETRY": "false", "BROWSER_USE_CLOUD_SYNC": "false",
                        "BROWSER_USE_CLOUD_HINTS": "false", "PYTHON_DOTENV_DISABLED": "1"})
+    observing = False
     try:
         data = json.loads(sys.stdin.buffer.read(20000))
-        if set(data) != {"url", "task"} or not isinstance(data["task"], str) or not 0 < len(data["task"]) <= 4000:
+        observing = isinstance(data, dict) and set(data) == {"url"} and isinstance(data["url"], str)
+        if observing:
+            operation = observe(data["url"])
+        elif (isinstance(data, dict) and set(data) == {"url", "task"}
+              and isinstance(data["task"], str) and 0 < len(data["task"]) <= 4000):
+            operation = browse(data["url"], data["task"])
+        else:
             raise ValueError
         with redirect_stdout(sys.stderr):
-            result = asyncio.run(asyncio.wait_for(browse(data["url"], data["task"]), timeout=150))
+            result = asyncio.run(asyncio.wait_for(operation, timeout=150))
         print(json.dumps(result, ensure_ascii=True))
         return 0
     except ModelTaskError:
         print(json.dumps({"ok": False, "error": "model_task_failed"}))
+        return 1
+    except BrowserError as error:
+        result = {"ok": False}
+        if observing:
+            result["error"] = error.code
+        print(json.dumps(result))
         return 1
     except Exception:
         print(json.dumps({"ok": False}))

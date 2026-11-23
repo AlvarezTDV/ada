@@ -147,11 +147,12 @@ class ExtensionRegistry:
         if entry.state == ExtensionState.FAILED:
             raise self._error(entry, ErrorCode.EXECUTION_FAILED, entry.reason)
 
-    def enable(self, extension_id, *, only_if_failed=False):
+    def enable(self, extension_id, *, only_if_failed=False, retry_unavailable=False):
         """Enable or explicitly retry a failed/unavailable provider, if quiescent."""
         with self._lock:
             entry = self._extensions[extension_id]
-            if only_if_failed and entry.state != ExtensionState.FAILED:
+            if (only_if_failed and entry.state != ExtensionState.FAILED
+                    and not (retry_unavailable and entry.state == ExtensionState.UNAVAILABLE_DEPENDENCY)):
                 return
             if entry.state == ExtensionState.REJECTED_INCOMPATIBLE:
                 raise self._error(entry, ErrorCode.INCOMPATIBLE_CONTRACT, entry.reason)
@@ -326,23 +327,38 @@ class ExtensionRegistry:
                 entry.reason = ""
             return value
 
+    def _candidates(self, capability, preferred):
+        candidates = [e for e in self._extensions.values()
+                      if e.manifest.capability == capability and e.enabled]
+        candidates.sort(key=lambda e: (e.manifest.extension_id == preferred, e.priority),
+                        reverse=True)
+        return candidates
+
+    def provider_catalog(self, capability: CapabilityKind
+                         ) -> tuple[ExtensionManifest | None, tuple[ExtensionManifest, ...]]:
+        """Return the current preference (even if disabled) and the ordered enabled catalog."""
+        with self._lock:
+            first = self._preferred.get(capability) or self._active.get(capability)
+            enabled = tuple(entry.manifest for entry in self._candidates(capability, first))
+            preferred = self._extensions[first].manifest if first else next(iter(enabled), None)
+            return preferred, enabled
+
+    def _load(self, entry, deadline):
+        with self._lock:
+            self._require_enabled(entry)
+            loaded = entry.loaded
+        if not loaded:
+            if entry.probe is not None:
+                self._invoke(entry, entry.probe, deadline, "probe")
+            self._invoke(entry, entry.factory, deadline, "factory")
+
     def _resolve(self, capability, deadline):
         with self._lock:
-            candidates = [e for e in self._extensions.values()
-                          if e.manifest.capability == capability and e.enabled]
-            preferred = self._preferred.get(capability)
-            candidates.sort(key=lambda e: (e.manifest.extension_id == preferred, e.priority),
-                            reverse=True)
+            candidates = self._candidates(capability, self._preferred.get(capability))
         errors = []
         for entry in candidates:
             try:
-                with self._lock:
-                    self._require_enabled(entry)
-                    loaded = entry.loaded
-                if not loaded:
-                    if entry.probe is not None:
-                        self._invoke(entry, entry.probe, deadline, "probe")
-                    self._invoke(entry, entry.factory, deadline, "factory")
+                self._load(entry, deadline)
                 with self._lock:
                     self._require_enabled(entry)
                     self._active[capability] = entry.manifest.extension_id
@@ -370,6 +386,25 @@ class ExtensionRegistry:
         deadline = time.monotonic() + timeout_s
         entry, adapter = self._resolve(capability, deadline)
         return self._invoke(entry, lambda: fn(adapter), deadline, "execute")
+
+    def execute_provider(self, extension_id: str, fn, *, timeout_s: float = 30.0):
+        """Execute exactly one provider and retain it as preferred only on success."""
+        if not math.isfinite(timeout_s) or timeout_s <= 0:
+            raise ValueError("timeout_s must be a finite positive number.")
+        deadline = time.monotonic() + timeout_s
+        with self._lock:
+            entry = self._extensions[extension_id]
+            generation = entry.generation
+        self._load(entry, deadline)
+        response = self._invoke(entry, lambda: fn(entry.adapter), deadline, "execute")
+        with self._lock:
+            if generation != entry.generation:
+                raise self._error(entry, ErrorCode.EXECUTION_FAILED,
+                                  "Extension was disabled or reconfigured during the call.")
+            capability = entry.manifest.capability
+            self.set_preferred_provider(capability, extension_id)
+            self._active[capability] = extension_id
+        return response
 
     def diagnostics(self) -> list[ExtensionDiagnostic]:
         """Return immutable snapshots without executing extension code."""

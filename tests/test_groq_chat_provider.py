@@ -56,7 +56,11 @@ class GroqChatProviderTests(IsolatedPromptFixture):
              patch.object(ada, "print_header"), \
              patch.object(ada, "print_ada_response") as display, \
              patch("builtins.input", side_effect=[*inputs, KeyboardInterrupt()]):
-            ada.chat_loop(speech_enabled=speech_enabled)
+            # This harness supplies only Groq responses; shared fallback has its own HTTP doubles.
+            registry = ada.ExtensionRegistry()
+            ada.register_default_adapters(registry, voice_factory=lambda: ada.VoiceEngine(mode="edge"))
+            registry.disable(ada.OllamaReasoningAdapter.manifest.extension_id)
+            ada.chat_loop(speech_enabled=speech_enabled, registry=registry)
         return requests, console, voice.return_value, display
 
     def test_default_provider_is_groq_with_gpt_oss_20b_and_missing_key_raises_config_error(self):

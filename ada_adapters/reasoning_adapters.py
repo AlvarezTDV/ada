@@ -17,6 +17,12 @@ class _ReasoningManifest(ExtensionManifest):
     required_env: tuple[str, ...] = ()
 
 
+def missing_reasoning_env(manifest: ExtensionManifest) -> tuple[str, ...]:
+    """Check backup readiness without creating a client or exposing credential values."""
+    return tuple(name for name in getattr(manifest, "required_env", ())
+                 if not (os.getenv(name) or "").strip())
+
+
 class _ReasoningAdapter:
     def __init__(self, *, client=None, model: str = ""):
         self._client = client

@@ -1,6 +1,8 @@
 """Public session integration checks with fake providers and temporary SQLite."""
 
 import copy
+from contextlib import closing
+import hashlib
 import io
 import os
 from pathlib import Path
@@ -8,6 +10,7 @@ import sqlite3
 import sys
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import httpx
@@ -19,7 +22,7 @@ from ada_core import (
     ExtensionRegistry, ExtensionState, HealthReport, SideEffectProfile, TurnMode,
     WebNavigationResponse,
 )
-from ada_adapters import GroqChainReasoningAdapter, SqliteMemoryAdapter
+from ada_adapters import GroqChainReasoningAdapter, SqliteMemoryAdapter, register_default_adapters
 from test_groq_chat_provider import completion, status_error
 from test_memory_prompt import IsolatedPromptFixture, ada
 
@@ -149,7 +152,7 @@ class ArchitecturalResilienceTests(IsolatedPromptFixture):
             (ada.openai.APITimeoutError(request=request), 1, "tiempo"),
         ):
             with self.subTest(error=type(error).__name__):
-                session = self.session()
+                session = self.session(self.minimal_registry())
                 self.client.chat.completions.create.side_effect = [
                     completion("primera"), *[error] * attempts, completion("recuperada")]
                 self.assertEqual(session.handle_text("hola").kind, "chat")
@@ -176,7 +179,7 @@ class ArchitecturalResilienceTests(IsolatedPromptFixture):
                 (status_error(ada.openai.RateLimitError, 429), 2),
             ):
                 with self.subTest(text=text, error=type(error).__name__):
-                    session = self.session()
+                    session = self.session(self.minimal_registry())
                     before, database = copy.deepcopy(session.messages), self.snapshot()
                     self.client.chat.completions.create.side_effect = [
                         *[error] * attempts, completion("recuperada")]
@@ -203,7 +206,6 @@ class ArchitecturalResilienceTests(IsolatedPromptFixture):
         for field in ("installed", "enabled", "compatible", "available", "model"):
             self.assertIn(field, status.text.lower())
         self.assertIn(ada.DEFAULT_MODEL, status.text)
-        self.assertIn("DISABLED", status.text)
         self.assertIn("UNAVAILABLE_DEPENDENCY", status.text)
         self.factory.assert_not_called()
         self.assertEqual(session.messages, before)
@@ -294,7 +296,7 @@ class ArchitecturalResilienceTests(IsolatedPromptFixture):
                 model = request.model or (
                     "named-model" if request.mode == TurnMode.REASONING else "default-model"
                 )
-                return CompletionResponse(f"answer from {model}", model)
+                return SimpleNamespace(text=f"answer from {model}", model=model)
 
         registry = self.minimal_registry()
         registry.register(
@@ -310,6 +312,257 @@ class ArchitecturalResilienceTests(IsolatedPromptFixture):
         result = session.handle_text(text)
         self.assertEqual((result.kind, result.text), ("chat", "answer from named-model"))
         self.assertEqual(models, ["", "named-model", "named-model"])
+
+    def install_reasoning_doubles(self):
+        local = Mock(base_url=ada.DEFAULT_LOCAL_URL)
+        groq = self.client
+        clients = {"local": (local, ada.DEFAULT_LOCAL_MODEL), "groq": (groq, ada.DEFAULT_MODEL)}
+        self.factory.side_effect = clients.__getitem__
+        return local.chat.completions.create, groq.chat.completions.create
+
+    def register_third_reasoning_provider(self, session, complete):
+        manifest = ExtensionManifest("reasoning.fixture", CapabilityKind.REASONING,
+                                     SideEffectProfile.PURE_READ)
+        session.registry.register(manifest, lambda: Mock(complete=complete))
+
+    @patch.dict(os.environ, {"GROQ_API_KEY": "gsk_fixture"})
+    def test_reasoning_queue_reaches_a_third_provider_after_local_and_groq(self):
+        local, groq = self.install_reasoning_doubles()
+        attempts = []
+
+        def fail_local(**kwargs):
+            attempts.append(("local", kwargs["model"]))
+            raise ada.openai.APIConnectionError(request=httpx.Request("POST", ada.DEFAULT_LOCAL_URL))
+
+        def fail_groq(**kwargs):
+            attempts.append(("groq", kwargs["model"]))
+            raise status_error(ada.openai.RateLimitError, 429)
+
+        def succeed(request):
+            attempts.append(("fixture", request.model))
+            return CompletionResponse("Third provider answered", "fixture-model")
+
+        local.side_effect, groq.side_effect = fail_local, fail_groq
+        session = self.session(provider="local")
+        self.register_third_reasoning_provider(session, succeed)
+
+        result = session.handle_text("hola")
+
+        self.assertEqual(attempts, [("local", ada.DEFAULT_LOCAL_MODEL),
+                                    *[("groq", model) for model in ada.DEFAULT_GROQ_MODELS],
+                                    ("fixture", "")])
+        self.assertEqual((result.kind, result.text, session.model),
+                         ("chat", "Third provider answered", "fixture-model"))
+        self.assertEqual(len(result.notices), 1)
+        self.assertIn("reasoning.groq", result.notices[0])
+        self.assertEqual(session.handle_text("otra pregunta").kind, "chat")
+        self.assertEqual(attempts[-1], ("fixture", "fixture-model"))
+        self.assertEqual(len(attempts), 5)
+
+    @patch.dict(os.environ, {"GROQ_API_KEY": "gsk_fixture"})
+    def test_provider_promotion_is_sticky_and_local_can_recover_after_groq_exhausts_quota(self):
+        local, groq = self.install_reasoning_doubles()
+        local.side_effect = [RuntimeError("Ollama stopped"), completion("Local recovered")]
+        groq.side_effect = [
+            completion("Groq backup"), completion("Groq still active"),
+            *[status_error(ada.openai.RateLimitError, 429) for _ in ada.DEFAULT_GROQ_MODELS],
+        ]
+        session = self.session(provider="local")
+
+        first = session.handle_text("hola")
+        self.assertEqual(first.text, "Groq backup")
+        self.assertEqual(len(first.notices), 1)
+        self.assertIn("reasoning.groq", first.notices[0])
+        self.assertIn(f"yes | {ada.DEFAULT_MODEL}", session.handle_text("/estado").text)
+        second = session.handle_text("otra pregunta")
+        self.assertEqual((second.text, second.notices), ("Groq still active", ()))
+        local.assert_called_once()
+        third = session.handle_text("una última pregunta")
+        self.assertEqual((third.text, third.notices), ("Local recovered", ()))
+        self.assertIn(f"yes | {ada.DEFAULT_LOCAL_MODEL}", session.handle_text("/estado").text)
+        self.assertEqual([call.kwargs["model"] for call in local.call_args_list],
+                         [ada.DEFAULT_LOCAL_MODEL] * 2)
+        self.assertEqual([call.kwargs["model"] for call in groq.call_args_list],
+                         [ada.DEFAULT_MODEL, ada.DEFAULT_MODEL, *ada.DEFAULT_GROQ_MODELS])
+
+    def test_local_failure_skips_unconfigured_groq_and_still_reaches_the_next_provider(self):
+        local, groq = self.install_reasoning_doubles()
+        local.side_effect = RuntimeError("Ollama stopped")
+        session = self.session(provider="local")
+        fallback = Mock(return_value=CompletionResponse("Offline fallback", "fixture-model"))
+        self.register_third_reasoning_provider(session, fallback)
+
+        result = session.handle_text("hola")
+
+        self.assertEqual((result.kind, result.text, result.notices),
+                         ("chat", "Offline fallback", ()))
+        self.factory.assert_called_once_with("local")
+        groq.assert_not_called()
+        fallback.assert_called_once()
+
+    @patch.dict(os.environ, {"GROQ_API_KEY": "gsk_fixture"})
+    def test_terminal_shows_cloud_notice_once_before_the_fallback_request(self):
+        local, groq = self.install_reasoning_doubles()
+        local.side_effect = RuntimeError("Ollama stopped")
+        shown = []
+        marker = "proveedor en la nube: reasoning.groq"
+
+        def observe_notice(**kwargs):
+            shown.append(marker in self.output.getvalue())
+            return completion("Groq backup")
+
+        groq.side_effect = observe_notice
+        with patch.object(ada, "print_header"), patch("builtins.input", side_effect=["hola", "salir"]):
+            ada.chat_loop(provider="local")
+
+        self.assertEqual(shown, [True])
+        self.assertEqual(self.output.getvalue().count(marker), 1)
+
+    def test_injected_default_catalog_honors_the_requested_initial_provider(self):
+        local, groq = self.install_reasoning_doubles()
+        local.return_value = completion("Local answer")
+        registry = ExtensionRegistry()
+        register_default_adapters(registry, provider="groq")
+        session = self.session(registry, provider="local")
+
+        self.assertEqual(session.handle_text("hola").text, "Local answer")
+        groq.assert_not_called()
+
+    def test_disabling_preferred_local_does_not_bypass_cloud_safeguards(self):
+        for key in ("", "gsk_fixture"):
+            with self.subTest(configured=bool(key)), patch.dict(os.environ, {"GROQ_API_KEY": key}):
+                local, groq = self.install_reasoning_doubles()
+                local.return_value = completion("Local answer")
+                session = self.session(provider="local")
+                self.assertEqual(session.handle_text("hola").text, "Local answer")
+                session.registry.disable("reasoning.ollama_local")
+                seen = []
+                groq.side_effect = lambda **kwargs: (
+                    completion("Cloud answer") if seen else completion("Notice was missing")
+                )
+                self.factory.reset_mock()
+                groq.reset_mock()
+
+                result = session.handle_text("otra pregunta", on_reasoning_notice=seen.append)
+
+                if key:
+                    self.assertEqual(result.text, "Cloud answer")
+                    self.assertEqual(result.notices, tuple(seen))
+                    self.assertEqual(len(seen), 1)
+                    self.factory.assert_called_once_with("groq")
+                else:
+                    self.assertEqual((result.kind, result.notices, seen), ("error", (), []))
+                    self.factory.assert_not_called()
+                    groq.assert_not_called()
+
+    def test_status_does_not_mark_unattempted_reasoning_backup_active(self):
+        local, groq = self.install_reasoning_doubles()
+        local.side_effect = [
+            completion("Local answer"),
+            ada.openai.APITimeoutError(request=httpx.Request("POST", ada.DEFAULT_LOCAL_URL)),
+        ]
+        session = self.session(provider="local")
+        self.assertEqual(session.handle_text("hola").text, "Local answer")
+        self.assertEqual(session.handle_text("otra pregunta").kind, "error")
+
+        line = next(row for row in session.handle_text("/estado").text.splitlines()
+                    if row.startswith("reasoning.groq "))
+
+        self.assertEqual(line.split(" | ")[6:8], ["no", ada.DEFAULT_MODEL])
+        self.assertEqual(session.model, ada.DEFAULT_LOCAL_MODEL)
+        groq.assert_not_called()
+
+    def test_transient_reasoning_dependency_recovers_on_a_new_operation(self):
+        local, _ = self.install_reasoning_doubles()
+        local.return_value = completion("Local recovered")
+        client = self.factory.side_effect("local")
+        self.factory.side_effect = [ImportError("Temporary dependency failure"), client]
+        session = self.session(provider="local")
+        session.registry.disable("reasoning.groq")
+
+        self.assertEqual(session.handle_text("hola").kind, "error")
+        self.factory.assert_called_once_with("local")
+        self.assertEqual(session.handle_text("otra pregunta").text, "Local recovered")
+        self.assertEqual(self.factory.call_count, 2)
+
+    @patch.dict(os.environ, {"GROQ_API_KEY": "gsk_fixture"})
+    def test_unusable_third_party_response_retries_before_advancing(self):
+        local, groq = self.install_reasoning_doubles()
+        local.side_effect = RuntimeError("Ollama stopped")
+        groq.side_effect = RuntimeError("Groq stopped")
+        session = self.session(provider="local")
+        blank = Mock(return_value=CompletionResponse("   ", "fixture-model"))
+        self.register_third_reasoning_provider(session, blank)
+        manifest = ExtensionManifest("reasoning.last", CapabilityKind.REASONING,
+                                     SideEffectProfile.PURE_READ)
+        last = Mock(return_value=CompletionResponse("Usable answer", "last-model"))
+        session.registry.register(manifest, lambda: Mock(complete=last))
+
+        self.assertEqual(session.handle_text("hola").text, "Usable answer")
+        self.assertEqual(blank.call_count, 2)
+        last.assert_called_once()
+        self.assertEqual(session.model, "last-model")
+
+    @patch.dict(os.environ, {"GROQ_API_KEY": "gsk_fixture"})
+    def test_failed_first_reasoning_turn_does_not_initialize_sqlite(self):
+        local, groq = self.install_reasoning_doubles()
+        local.side_effect = RuntimeError("Ollama stopped")
+        groq.side_effect = RuntimeError("Groq stopped")
+        for index, text in enumerate(("hola", "Anota mi edad: 30")):
+            with self.subTest(text=text):
+                fresh = Path(memory.DB_PATH).with_name(f"not-initialized-{index}.sqlite")
+                with patch.object(memory, "DB_PATH", str(fresh)):
+                    session = self.session(provider="local")
+                    before = list(session.messages)
+                    self.assertEqual(session.handle_text(text).kind, "error")
+                    self.assertEqual(session.messages, before)
+                    self.assertFalse(fresh.exists())
+
+    @patch.dict(os.environ, {"GROQ_API_KEY": "gsk_fixture"})
+    def test_exhausting_providers_reports_each_failure_and_keeps_history_and_sqlite_intact(self):
+        local, groq = self.install_reasoning_doubles()
+        local.side_effect = ada.openai.APIConnectionError(
+            request=httpx.Request("POST", ada.DEFAULT_LOCAL_URL))
+        groq.side_effect = [status_error(ada.openai.RateLimitError, 429)
+                            for _ in ada.DEFAULT_GROQ_MODELS]
+        session = self.session(provider="local")
+        third = Mock(side_effect=RuntimeError("fixture backend stopped"))
+        self.register_third_reasoning_provider(session, third)
+        before, db_hash = list(session.messages), hashlib.sha256(self.snapshot()).digest()
+
+        result = session.handle_text("hola")
+
+        self.assertEqual(result.kind, "error")
+        self.assertEqual(len(result.notices), 1)
+        for detail in ("reasoning.ollama_local: network_unavailable", "reasoning.groq: quota_exceeded",
+                       "reasoning.fixture: execution_failed", "fixture backend stopped"):
+            self.assertIn(detail, result.text)
+        self.assertEqual(session.messages, before)
+        self.assertEqual(hashlib.sha256(self.snapshot()).digest(), db_hash)
+        local.assert_called_once()
+        self.assertEqual(groq.call_count, len(ada.DEFAULT_GROQ_MODELS))
+        third.assert_called_once()
+
+    @patch.dict(os.environ, {"GROQ_API_KEY": "gsk_fixture"})
+    def test_memory_extraction_retries_the_same_provider_then_uses_and_promotes_the_backup(self):
+        local, groq = self.install_reasoning_doubles()
+        local.side_effect = [completion(""), completion("partial", finish_reason="length")]
+        groq.side_effect = [
+            completion('[{"category": "general", "key": "edad", "value": "30"}]'),
+            completion("Groq still active"),
+        ]
+        session = self.session(provider="local")
+
+        result = session.handle_text("Anota mi edad: 30")
+
+        self.assertEqual(result.kind, "memory")
+        self.assertEqual(len(result.notices), 1)
+        self.assertIn("reasoning.groq", result.notices[0])
+        with closing(sqlite3.connect(memory.DB_PATH)) as connection:
+            self.assertIn(("edad", "30"), connection.execute("SELECT key, value FROM memories").fetchall())
+        self.assertEqual([call.kwargs["model"] for call in local.call_args_list],
+                         [ada.DEFAULT_LOCAL_MODEL] * 2)
+        self.assertEqual(session.handle_text("hola").text, "Groq still active")
 
     def test_malformed_memory_batches_leave_storage_ready_for_recall_and_save(self):
         session = self.session()

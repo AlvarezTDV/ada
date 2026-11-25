@@ -103,6 +103,24 @@ python ada.py --speak
 
 Run `python ada.py --help` for the available startup options. Audio dependencies in `requirements.txt` are needed only when using their respective audio features; missing or failing audio components report an error without preventing text chat.
 
+### Local HTTP API
+
+Set `ADA_TOKEN` to a random secret of at least 16 characters (32+ recommended).
+Run `python -B -m ada_server.app`. Uvicorn listens only on `127.0.0.1:8000`.
+`GET /health` is public; it returns `{"status":"ok"}` without diagnostics.
+
+- **Native clients:** Send `Authorization: Bearer <ADA_TOKEN>`. Never put the token in a URL.
+- **Browser clients:** Set `ADA_TLS_CERTFILE` and `ADA_TLS_KEYFILE` to enable HTTPS
+  with a trusted certificate for `127.0.0.1`. From the same origin, send
+  `POST /auth/login` with `{"token":"<ADA_TOKEN>"}` to receive a signed
+  `HttpOnly`, `Secure`, `SameSite=Strict` cookie. It expires after seven days.
+  `GET /auth/me` checks authentication; `POST /auth/logout` clears the browser cookie.
+  Rotate `ADA_TOKEN` and restart to invalidate issued cookies and the old Bearer token.
+- **Sessions:** `POST /sessions` defaults to `ephemeral`; use `{"mode":"persistent"}`
+  to retain history in `ada_state.db`. Use `GET /sessions` to list sessions,
+  `POST /sessions/{id}/chat` with `{"text":"..."}` to chat, and
+  `DELETE /sessions/{id}` to delete one. `GET /status` returns redacted diagnostics.
+
 ### Interaction Controls
 - **Text:** Type next to the `🔴 > ` prompt and press `ENTER`.
 - **Diagnostics:** Type `/estado` to inspect registered extensions, their enabled/compatible/available status, failure reasons, and the last confirmed model.

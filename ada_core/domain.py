@@ -10,6 +10,21 @@ class TurnMode(str, Enum):
     REASONING = "reasoning"
 
 
+class SessionMode(str, Enum):
+    EPHEMERAL = "ephemeral"
+    PERSISTENT = "persistent"
+
+
+@dataclass(frozen=True)
+class SessionSummary:
+    session_id: str
+    mode: SessionMode
+    title: str
+    created_at: str
+    updated_at: str
+    message_count: int
+
+
 @dataclass(frozen=True)
 class ChatMessage:
     role: str

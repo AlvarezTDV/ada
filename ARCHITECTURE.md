@@ -73,6 +73,25 @@ preserving test injection. STT tests inject a worker command rather than a
 parent-side voice engine. Direct CLI execution binds the same facade module used by the
 reasoning adapters.
 
+### Conversation sessions
+
+`SessionManager` takes a session factory (for example, a callable wrapping
+`create_session(headless=True)`) and an optional `ConversationStorePort`.
+It serializes turns per session ID without blocking turns in other sessions.
+The existing CLI does not use the manager.
+
+| Mode | History | `salir` |
+|---|---|---|
+| `ephemeral` | In RAM, scoped to the manager. | Removes the session and calls its orchestrator's `shutdown()`. |
+| `persistent` | Ordered snapshots in `SqliteConversationStore` (`ada_state.db`, separate from `ada_memory.db`). | Drops only the cached orchestrator; the next turn reloads the same history. |
+
+Snapshots include the system message and are replaced atomically only when a
+successful turn changes history. Deleting a persistent session also deletes
+its messages. `shutdown_all()` drains admitted operations before releasing
+cached sessions without deleting saved history. Callbacks can observe state but
+must not start another session operation on the same manager. Use one manager
+to serialize turns against a given store.
+
 ### Diagnostics and fault isolation
 
 Core diagnostics redact configured `GROQ_API_KEY`, `OPENAI_API_KEY`, `ADA_TOKEN`,

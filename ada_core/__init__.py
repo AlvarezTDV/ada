@@ -4,16 +4,18 @@ CORE_CONTRACT_VERSION = 1
 
 from .domain import (
     ChatMessage, CompletionRequest, CompletionResponse, MemoryItem,
-    SpeechOutputReport, TurnMode, WebNavigationRequest, WebNavigationResponse,
+    SessionMode, SessionSummary, SpeechOutputReport, TurnMode, WebNavigationRequest, WebNavigationResponse,
 )
 from .errors import CapabilityError, CapabilityKind, ErrorCode, SideEffectProfile, redact_secrets
 from .manifest import ExecutionModel, ExtensionManifest, PermissionSet
 from .ports import (
-    ExtensionLifecyclePort, InteractiveSpeechInputPort, MemoryCommandPort, MemoryPort, ReasoningPort, SpeechInputPort,
+    ConversationStorePort, ExtensionLifecyclePort, InteractiveSpeechInputPort, MemoryCommandPort, MemoryPort,
+    ReasoningPort, SpeechInputPort,
     SpeechOutputPort, WebNavigationPort,
 )
 from .registry import ExtensionRegistry, ExtensionState, HealthReport
 from .orchestrator import SessionOrchestrator, SessionResult
+from .session_manager import SessionManager
 
 __all__ = [
     "CORE_CONTRACT_VERSION", "ChatMessage", "CompletionRequest", "CompletionResponse",
@@ -23,5 +25,5 @@ __all__ = [
     "PermissionSet", "ExtensionLifecyclePort", "MemoryCommandPort", "MemoryPort", "ReasoningPort",
     "SpeechInputPort", "InteractiveSpeechInputPort", "SpeechOutputPort", "WebNavigationPort",
     "ExtensionRegistry", "ExtensionState", "HealthReport",
-    "SessionOrchestrator", "SessionResult",
+    "ConversationStorePort", "SessionManager", "SessionMode", "SessionOrchestrator", "SessionResult", "SessionSummary",
 ]

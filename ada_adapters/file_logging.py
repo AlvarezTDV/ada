@@ -3,6 +3,7 @@
 import logging
 from functools import partial
 from logging.handlers import RotatingFileHandler
+import sys
 
 from ada_core.errors import redact_secrets
 
@@ -24,9 +25,21 @@ class _RedactSecrets(logging.Filter):
         return True
 
 
+class _RedactedRotatingFileHandler(RotatingFileHandler):
+    def handleError(self, record: logging.LogRecord) -> None:
+        # The default stderr diagnostic can print the raw chained exception.
+        if not isinstance(sys.exc_info()[1], OSError):
+            super().handleError(record)
+        elif logging.raiseExceptions and sys.stderr:
+            try:
+                sys.stderr.write("Could not write to the rotating log file.\n")
+            except (OSError, ValueError):
+                pass
+
+
 def configure_redacted_file_logger(log_path, *, max_bytes=5_000_000, backup_count=3):
     """Return a standalone logger; the caller owns its file handler's lifetime."""
-    handler = RotatingFileHandler(
+    handler = _RedactedRotatingFileHandler(
         log_path, maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8",
     )
     handler.addFilter(_RedactSecrets())

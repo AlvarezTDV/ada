@@ -1,3 +1,5 @@
+from contextlib import redirect_stderr
+import io
 import json
 import logging
 import os
@@ -179,6 +181,29 @@ class HeadlessHardeningTests(unittest.TestCase):
                 "Token=[REDACTED] Password=[REDACTED]",
             )
 
+    def test_redaction_masks_contextual_repr_and_ascii_escapes(self):
+        secret = "fixture's na\u00efve password"
+        context = f'password="{secret}"'
+        for format_literal in (repr, ascii):
+            with self.subTest(format=format_literal.__name__):
+                rendered = format_literal(context)
+                self.assertIn(r"\'", rendered)
+                self.assertEqual(
+                    redact_secrets(rendered, (secret, ""), include_escaped=True),
+                    format_literal('password="[REDACTED]"'),
+                )
+                self.assertEqual(redact_secrets(rendered, (secret, "")), rendered)
+
+    def test_redaction_masks_utf8_bytes_repr_in_both_quote_contexts(self):
+        secret = "fixture's caf\u00e9 password"
+        encoded = secret.encode("utf-8")
+        for prefix in (b"", b'password="'):
+            with self.subTest(prefix=prefix):
+                suffix = b'"' if prefix else b""
+                rendered = repr(prefix + encoded + suffix)
+                mask = repr(prefix + b"[REDACTED]" + suffix) if prefix else 'b"[REDACTED]"'
+                self.assertEqual(redact_secrets(rendered, (secret,), include_escaped=True), mask)
+
     def test_sqlite_connection_enables_wal_and_busy_timeout(self):
         with (
             TemporaryDirectory() as directory,
@@ -269,3 +294,63 @@ class HeadlessHardeningTests(unittest.TestCase):
             self.assertIn('payload={"password": "[REDACTED]"}', text)
             self.assertIn("KeyError: '[REDACTED]'", text)
             self.assertNotIn(password, text)
+
+    def test_rotating_file_logger_reports_write_errors_without_exception_details(self):
+        from ada_adapters.file_logging import configure_redacted_file_logger
+
+        credential = "synthetic-write-failure-credential"
+        stderr = io.StringIO()
+        with (
+            TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"ADA_TOKEN": credential}),
+            patch.object(logging, "raiseExceptions", True),
+            redirect_stderr(stderr),
+        ):
+            logger = configure_redacted_file_logger(Path(directory) / "ada.log", max_bytes=0)
+            handler = logger.handlers[0]
+            try:
+                with patch.object(
+                    handler.stream, "write", side_effect=OSError(credential),
+                ) as write:
+                    try:
+                        raise RuntimeError(credential)
+                    except RuntimeError:
+                        logger.exception("Could not complete request")
+                    write.assert_called_once()
+                    logger.error("Could not complete request")
+                    with patch.object(logging, "raiseExceptions", False):
+                        logger.error("Could not complete request")
+                    self.assertEqual(write.call_count, 3)
+            finally:
+                handler.close()
+        self.assertEqual(
+            stderr.getvalue(), "Could not write to the rotating log file.\n" * 2,
+        )
+
+    def test_rotating_file_logger_preserves_active_exception_when_stderr_is_closed(self):
+        from ada_adapters.file_logging import configure_redacted_file_logger
+
+        stderr = io.StringIO()
+        stderr.close()
+        original = RuntimeError("synthetic application error")
+        with (
+            TemporaryDirectory() as directory,
+            patch.object(logging, "raiseExceptions", True),
+            redirect_stderr(stderr),
+        ):
+            logger = configure_redacted_file_logger(Path(directory) / "ada.log", max_bytes=0)
+            handler = logger.handlers[0]
+            try:
+                with patch.object(
+                    handler.stream, "write", side_effect=OSError("synthetic write failure"),
+                ) as write:
+                    with self.assertRaises(RuntimeError) as caught:
+                        try:
+                            raise original
+                        except RuntimeError:
+                            logger.exception("Could not complete request")
+                            raise
+                    self.assertIs(caught.exception, original)
+                    write.assert_called_once()
+            finally:
+                handler.close()

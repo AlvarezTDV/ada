@@ -40,6 +40,22 @@ class SideEffectProfile(str, Enum):
     NON_IDEMPOTENT_MUTATION = "non_idempotent_mutation"
 
 
+def _escaped_secret_variants(value: str) -> Iterable[str]:
+    for format_literal in (repr, ascii):
+        yield format_literal(value)[1:-1]
+        # A double quote elsewhere in the literal forces single-quote delimiters.
+        yield format_literal('"' + value)[2:-1]
+    yield json.dumps(value)[1:-1]
+    yield json.dumps(value, ensure_ascii=False)[1:-1]
+
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError:
+        return  # A string with lone surrogates has no strict UTF-8 representation.
+    yield repr(encoded)[2:-1]
+    yield repr(b'"' + encoded)[3:-1]
+
+
 def redact_secrets(text: str, extra_secrets: Iterable[str] = (), *, include_escaped: bool = False) -> str:
     """Mask configured keys, literal extras and provider/auth token patterns.
 
@@ -57,11 +73,7 @@ def redact_secrets(text: str, extra_secrets: Iterable[str] = (), *, include_esca
     }
     if include_escaped:
         # Log formatting can turn a credential into a Python or JSON string literal.
-        secrets |= {
-            literal[1:-1] for value in secrets for literal in (
-                repr(value), ascii(value), json.dumps(value), json.dumps(value, ensure_ascii=False),
-            )
-        }
+        secrets |= {variant for value in secrets for variant in _escaped_secret_variants(value) if variant}
     # Auth schemes are case-insensitive; bearer tokens may include base64 symbols.
     patterns = [r"(?i:Bearer) [A-Za-z0-9._~+/-]+=*", r"gsk_[A-Za-z0-9]+"]
     patterns.extend(re.escape(value) for value in secrets)

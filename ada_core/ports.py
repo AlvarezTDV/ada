@@ -8,7 +8,7 @@ input is an encoded byte payload whose format is agreed with the adapter.
 from typing import Protocol, runtime_checkable
 
 from .domain import (
-    CompletionRequest, CompletionResponse, MemoryItem, SpeechOutputReport,
+    ChatMessage, CompletionRequest, CompletionResponse, MemoryItem, SessionSummary, SpeechOutputReport,
     WebNavigationRequest, WebNavigationResponse,
 )
 
@@ -43,6 +43,19 @@ class MemoryCommandPort(MemoryPort, Protocol):
     def list_all(self) -> tuple[MemoryItem, ...]: ...
     def save_batch(self, items: tuple[MemoryItem, ...]) -> tuple[MemoryItem, ...]: ...
     def delete_batch(self, keys: tuple[str, ...]) -> tuple[str, ...]: ...
+
+
+@runtime_checkable
+class ConversationStorePort(Protocol):
+    """Persistent sessions and ordered, atomic conversation snapshots."""
+
+    def create_session(self, summary: SessionSummary, messages: tuple[ChatMessage, ...]) -> None: ...
+    def list_sessions(self) -> tuple[SessionSummary, ...]: ...
+    def load_messages(self, session_id: str) -> tuple[ChatMessage, ...] | None:
+        """Return None only if the session does not exist."""
+        ...
+    def save_messages(self, session_id: str, messages: tuple[ChatMessage, ...], updated_at: str) -> None: ...
+    def delete_session(self, session_id: str) -> bool: ...
 
 
 @runtime_checkable

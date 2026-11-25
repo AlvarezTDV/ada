@@ -16,7 +16,14 @@ class _ClosingConnection(sqlite3.Connection):
 
 
 def get_db_connection():
-    return sqlite3.connect(DB_PATH, factory=_ClosingConnection)
+    conn = sqlite3.connect(DB_PATH, timeout=5.0, factory=_ClosingConnection)
+    try:
+        conn.execute("PRAGMA busy_timeout=5000;").close()
+        conn.execute("PRAGMA journal_mode=WAL;").close()
+    except BaseException:
+        conn.close()
+        raise
+    return conn
 
 
 @contextmanager

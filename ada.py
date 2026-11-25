@@ -5,6 +5,8 @@ import time
 import json
 import unicodedata
 import argparse
+from contextlib import nullcontext
+from contextvars import ContextVar
 from pathlib import Path
 
 # Suprimir el banner de pygame antes de importarlo
@@ -60,6 +62,7 @@ def _validate_navigation_url(url):
 
 console = Console()
 
+BASE_DIR = Path(__file__).resolve().parent
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 DEFAULT_GROQ_MODELS = ("openai/gpt-oss-20b", "openai/gpt-oss-120b")
 DEFAULT_GROQ_MODEL = DEFAULT_GROQ_MODELS[0]
@@ -86,7 +89,7 @@ def get_system_prompt(reload: bool = False, *, query: str = "",
     global _CACHED_SYSTEM_PROMPT
     if _CACHED_SYSTEM_PROMPT is None or reload:
         try:
-            with open("system_prompt.txt", "r", encoding="utf-8") as f:
+            with (BASE_DIR / "system_prompt.txt").open(encoding="utf-8") as f:
                 base_prompt = f.read().strip()
         except FileNotFoundError:
             base_prompt = "Eres A.D.A., una asistente de IA personal."
@@ -150,9 +153,18 @@ def _redact_provider_text(text: str) -> str:
     return re.sub(r"gsk_[A-Za-z0-9]+", "[REDACTED]", text)
 
 
+_reasoning_notice = ContextVar("reasoning_notice", default=None)
+
+
+def _discard_notice(_message):
+    pass
+
+
 def create_chat_completion_with_fallback(client, model: str, messages: list, *,
                                          temperature: float, max_tokens: int,
-                                         think: bool = False, provider: str = "groq") -> tuple[object, str]:
+                                         think: bool = False, provider: str = "groq",
+                                         on_notice=None) -> tuple[object, str]:
+    notify = on_notice if on_notice is not None else _reasoning_notice.get()
     chain = get_groq_model_chain()
     candidates = [model]
     if ((provider == "groq" or str(getattr(client, "base_url", "")).startswith(GROQ_BASE_URL))
@@ -178,7 +190,10 @@ def create_chat_completion_with_fallback(client, model: str, messages: list, *,
                 raise
             notice = _redact_provider_text(
                 f"Cuota agotada en {candidate}; cambiando a modelo de respaldo: {candidates[index + 1]}")
-            console.print(Text(notice, style="dim #fd2636"))
+            if notify is None:
+                console.print(Text(notice, style="dim #fd2636"))
+            else:
+                notify(notice)
 
 
 def format_provider_error(error: Exception) -> str:
@@ -228,7 +243,7 @@ def _parse_memory_array(content: str) -> list:
 
 
 def execute_memory_command(text: str, client: OpenAI = None, model: str = "", *,
-                           complete=None, store=None) -> str | None:
+                           complete=None, store=None, on_status=None, on_event=None) -> str | None:
     """
     Detecta si el usuario usó una palabra clave al INICIO de su frase.
     Si es así, invoca al LLM puramente como parser JSON, ejecuta la DB, 
@@ -237,6 +252,20 @@ def execute_memory_command(text: str, client: OpenAI = None, model: str = "", *,
     """
     lowered = text.lower().strip()
     store = memory if store is None else store
+    use_console = on_status is None and on_event is None
+
+    def processing(message):
+        if use_console:
+            return console.status(f"[dim #fd2636]{message}[/dim #fd2636]")
+        if on_status is not None:
+            on_status(message)
+        return nullcontext()
+
+    def emit_event(message):
+        if use_console:
+            console.print(f"  [dim #fd2636]{message}[/dim #fd2636]")
+        elif on_event is not None:
+            on_event(message)
 
     def extract(prompt, budget):
         if complete is not None:
@@ -245,6 +274,7 @@ def execute_memory_command(text: str, client: OpenAI = None, model: str = "", *,
             client, model, [{"role": "user", "content": prompt}],
             temperature=0.0, max_tokens=max(budget, 300) if _is_reasoning_model(model) else budget,
             provider="local" if _is_local_client(client, model) else "groq",
+            **({} if use_console else {"on_notice": emit_event}),
         )
         return _completion_text(response)
     
@@ -257,12 +287,12 @@ REGLAS ESTRICTAS:
 Texto: "{text}"
 Responde ÚNICAMENTE con el array JSON válido."""
         try:
-            with console.status("[dim #fd2636]Procesando orden de guardado...[/dim #fd2636]"):
+            with processing("Procesando orden de guardado..."):
                 content = extract(prompt, 150)
             data = _parse_memory_array(content)
             saved = store.save_memories(data)
             for item in saved:
-                console.print(f"  [dim #fd2636]🧠 Anotado: {item['key']} -> {item['value']}[/dim #fd2636]")
+                emit_event(f"🧠 Anotado: {item['key']} -> {item['value']}")
             return "Información guardada."
         except (openai.APIError, CapabilityError):
             raise
@@ -284,7 +314,7 @@ Texto del usuario: "{text}"
 ¿A cuál clave de la lista se refiere el usuario por contexto o sinónimos? (Ej: si dice "mis años" y en la lista está "edad", debes deducir "edad").
 Responde ÚNICAMENTE con un array JSON de strings con las claves de la lista que coincidan lógicamente. Si no hay coincidencias semánticas, responde []."""
         try:
-            with console.status("[dim #fd2636]Procesando orden de borrado...[/dim #fd2636]"):
+            with processing("Procesando orden de borrado..."):
                 content = extract(prompt, 50)
             keys_to_delete = memory.validate_memory_keys(_parse_memory_array(content))
             if any(key not in keys for key in keys_to_delete):
@@ -292,7 +322,7 @@ Responde ÚNICAMENTE con un array JSON de strings con las claves de la lista que
             deleted = store.delete_memories(keys_to_delete)
             if deleted:
                 for k in deleted:
-                    console.print(f"  [dim #fd2636]🗑️ Olvidado: {k}[/dim #fd2636]")
+                    emit_event(f"🗑️ Olvidado: {k}")
                 return "Información eliminada de mi base de datos."
             return "No encontré ese dato en mi memoria para borrarlo."
         except (openai.APIError, CapabilityError):
@@ -353,8 +383,29 @@ def print_ada_response(text: str, mode: str):
 
 # ─── Bucle Principal ──────────────────────────────────────────────────────────
 
+class _QuietProviderRegistry:
+    """Bind a silent notice sink inside the reasoning worker, not its caller."""
+
+    def __init__(self, registry):
+        self._registry = registry
+
+    def __getattr__(self, name):
+        return getattr(self._registry, name)
+
+    def execute_provider(self, extension_id, operation, **kwargs):
+        def run(port):
+            token = _reasoning_notice.set(_discard_notice)
+            try:
+                return operation(port)
+            finally:
+                _reasoning_notice.reset(token)
+
+        return self._registry.execute_provider(extension_id, run, **kwargs)
+
+
 def create_session(provider="groq", registry=None, *,
-                   per_provider_timeout=DEFAULT_NAVIGATION_PROVIDER_TIMEOUT, clock=time.monotonic):
+                   per_provider_timeout=DEFAULT_NAVIGATION_PROVIDER_TIMEOUT, clock=time.monotonic,
+                   headless: bool = False, navigation_notice=None):
     """Composition root; retain facade injection points and perform no provider I/O."""
     provider = (provider or os.getenv("ADA_CHAT_PROVIDER") or "groq").strip().lower()
     if provider not in {"groq", "local"}:
@@ -374,6 +425,20 @@ def create_session(provider="groq", registry=None, *,
                 and any(entry.extension_id == defaults[provider] for entry in enabled)):
             registry.set_preferred_provider(CapabilityKind.REASONING, defaults[provider])
 
+    if headless:
+        _, speech_outputs = registry.provider_catalog(CapabilityKind.TTS)
+        for manifest in speech_outputs:
+            registry.disable(manifest.extension_id)
+        registry = _QuietProviderRegistry(registry)
+    elif navigation_notice is None:
+        navigation_notice = lambda notice: console.print(Text(notice, style="yellow"))
+
+    def memory_command(text, complete, store):
+        return execute_memory_command(
+            text, complete=complete, store=store,
+            **({"on_status": _discard_notice} if headless else {}),
+        )
+
     def prompt_factory(items, *, reload=False):
         context = memory._format_memories(
             [(item.category, item.key, item.value) for item in items],
@@ -392,11 +457,10 @@ def create_session(provider="groq", registry=None, *,
 
     return SessionOrchestrator(
         registry, prompt_factory=prompt_factory, classify_input=classify_input_mode,
-        memory_command=lambda text, complete, store: execute_memory_command(
-            text, complete=complete, store=store),
+        memory_command=memory_command,
         navigation_validator=_validate_navigation_url,
         navigation_observer=navigation_observer,
-        navigation_notice=lambda notice: console.print(Text(notice, style="yellow")),
+        navigation_notice=navigation_notice,
         missing_reasoning_env=missing_reasoning_env,
         memory_read_available=memory_read_available,
         per_provider_timeout=per_provider_timeout, clock=clock,

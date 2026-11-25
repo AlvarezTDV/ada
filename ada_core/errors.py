@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
+import json
 import os
 import re
 from typing import TYPE_CHECKING, Iterable
@@ -39,7 +40,7 @@ class SideEffectProfile(str, Enum):
     NON_IDEMPOTENT_MUTATION = "non_idempotent_mutation"
 
 
-def redact_secrets(text: str, extra_secrets: Iterable[str] = ()) -> str:
+def redact_secrets(text: str, extra_secrets: Iterable[str] = (), *, include_escaped: bool = False) -> str:
     """Mask configured keys, literal extras and provider/auth token patterns.
 
     Merge all matching spans before substitution so overlapping secrets cannot
@@ -49,9 +50,18 @@ def redact_secrets(text: str, extra_secrets: Iterable[str] = ()) -> str:
     secrets = {
         value for value in (
             os.environ.get("GROQ_API_KEY", ""),
-            os.environ.get("OPENAI_API_KEY", ""), *extra_secrets,
+            os.environ.get("OPENAI_API_KEY", ""),
+            os.environ.get("ADA_TOKEN", ""),
+            os.environ.get("OPENCODE_SERVER_PASSWORD", ""), *extra_secrets,
         ) if value
     }
+    if include_escaped:
+        # Log formatting can turn a credential into a Python or JSON string literal.
+        secrets |= {
+            literal[1:-1] for value in secrets for literal in (
+                repr(value), ascii(value), json.dumps(value), json.dumps(value, ensure_ascii=False),
+            )
+        }
     # Auth schemes are case-insensitive; bearer tokens may include base64 symbols.
     patterns = [r"(?i:Bearer) [A-Za-z0-9._~+/-]+=*", r"gsk_[A-Za-z0-9]+"]
     patterns.extend(re.escape(value) for value in secrets)

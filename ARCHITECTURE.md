@@ -32,6 +32,22 @@ boundary, **not a sandbox or an in-process thread terminator**.
 | STT / TTS | `voice_adapters.py` / `stt_worker.py`, `voice.py` | Independent lazy lifetimes: supervised microphone/Whisper subprocess; separate speech-output engine. |
 | Navigation | `browser_navigation_adapter.py` / isolated browser worker | Explicit URL/task only; output never enters memory, chat history, or TTS. |
 
+### Headless composition
+
+Hosts without a terminal call `create_session(headless=True)` and render the
+results of `session.handle_text(...)` themselves. The facade suppresses Rich
+status and progress output and disables the registry's speech-output extensions,
+including `tts.edge_with_local_fallback`. Use a dedicated registry when
+injecting one: these extensions are disabled on the supplied registry itself.
+The default CLI keeps its existing output and audio behavior.
+
+Provide `navigation_notice` to deliver the disclosure before page content falls
+back from local to cloud reasoning. Without a notice sink, that transition is
+skipped. Direct facade callers can replace terminal rendering with plain-text
+`on_status` and `on_event` callbacks for memory, or `on_notice` for model rotation.
+The base prompt is loaded from `system_prompt.txt` next to `ada.py`, regardless
+of the host's working directory.
+
 ### Memory and facade compatibility
 
 `MemoryPort` retains its existing recall/single-item contract.
@@ -43,6 +59,9 @@ actual-deletion acknowledgements remain unchanged. A replacement supporting only
 `MemoryPort` can still provide chat context; memory commands report the missing
 contract instead of writing directly to SQLite.
 
+SQLite connections set WAL mode and a five-second busy timeout. WAL may create
+`-wal` and `-shm` files alongside the database, so its directory must be writable.
+
 The public `get_client`, `get_system_prompt`, `execute_memory_command`,
 `run_browser_task`, `VoiceEngine`, and `chat_loop` facades remain available.
 Command extraction and persistence are injected through registry-backed
@@ -53,6 +72,15 @@ parent-side voice engine. Direct CLI execution binds the same facade module used
 reasoning adapters.
 
 ### Diagnostics and fault isolation
+
+Core diagnostics redact configured `GROQ_API_KEY`, `OPENAI_API_KEY`, `ADA_TOKEN`,
+and `OPENCODE_SERVER_PASSWORD` values, as well as known token patterns. Hosts
+can opt in to `ada_adapters.file_logging.configure_redacted_file_logger(path)`
+for rotating UTF-8 logs (5 MB per file, up to three backups by default). The
+logger redacts formatted messages and exception text, including common Python
+and JSON escapes, and does not propagate records to other loggers. The caller
+owns the file handler's lifetime.
+Do not send arbitrary provider payloads or credentials to logs.
 
 `/estado` reports every registered extension's ID, installed/enabled/compatible/
 available status, registry state, active selection, configured model, and reason.

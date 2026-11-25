@@ -19,7 +19,19 @@ def get_db_connection():
     conn = sqlite3.connect(DB_PATH, timeout=5.0, factory=_ClosingConnection)
     try:
         conn.execute("PRAGMA busy_timeout=5000;").close()
-        conn.execute("PRAGMA journal_mode=WAL;").close()
+        try:
+            cursor = conn.execute("PRAGMA journal_mode=WAL;")
+        except sqlite3.OperationalError as error:
+            code = getattr(error, "sqlite_errorcode", None)
+            if code is None:
+                # Python 3.10 does not expose SQLite result codes on exceptions.
+                if str(error) != "attempt to write a readonly database":
+                    raise
+            elif (code & 0xFF) != sqlite3.SQLITE_READONLY:
+                # The low byte is the primary code even for extended results.
+                raise
+        else:
+            cursor.close()
     except BaseException:
         conn.close()
         raise

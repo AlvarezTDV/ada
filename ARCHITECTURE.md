@@ -59,8 +59,10 @@ actual-deletion acknowledgements remain unchanged. A replacement supporting only
 `MemoryPort` can still provide chat context; memory commands report the missing
 contract instead of writing directly to SQLite.
 
-SQLite connections set WAL mode and a five-second busy timeout. WAL may create
-`-wal` and `-shm` files alongside the database, so its directory must be writable.
+SQLite connections set `busy_timeout=5000` and attempt to enable WAL. If an
+existing read-only rollback database rejects the switch with `SQLITE_READONLY`,
+it remains readable with the same timeout. WAL may create `-wal` and `-shm`
+files alongside writable databases.
 
 The public `get_client`, `get_system_prompt`, `execute_memory_command`,
 `run_browser_task`, `VoiceEngine`, and `chat_loop` facades remain available.

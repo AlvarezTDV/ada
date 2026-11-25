@@ -2,6 +2,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import sqlite3
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
@@ -188,6 +189,37 @@ class HeadlessHardeningTests(unittest.TestCase):
                 self.assertEqual(connection.execute("PRAGMA journal_mode").fetchone(), ("wal",))
                 self.assertEqual(connection.execute("PRAGMA busy_timeout").fetchone(), (5000,))
             self.assertEqual(connect.call_args.kwargs["timeout"], 5.0)
+
+    def test_sqlite_connection_keeps_readonly_rollback_database_readable(self):
+        connect = sqlite3.connect
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "memory.sqlite"
+            with connect(path, factory=memory._ClosingConnection) as seed:
+                seed.execute("PRAGMA journal_mode=DELETE").close()
+                seed.execute("CREATE TABLE fixture (value TEXT)")
+                seed.execute("INSERT INTO fixture VALUES ('synthetic')")
+
+            with (
+                patch.object(memory, "DB_PATH", f"{path.as_uri()}?mode=ro"),
+                patch.object(sqlite3, "connect", side_effect=lambda *args, **kwargs: connect(
+                    *args, uri=True, **kwargs,
+                )),
+                memory.get_db_connection() as connection,
+            ):
+                self.assertEqual(connection.execute("PRAGMA journal_mode").fetchone(), ("delete",))
+                self.assertEqual(connection.execute("PRAGMA busy_timeout").fetchone(), (5000,))
+                self.assertEqual(connection.execute("SELECT value FROM fixture").fetchone(),
+                                 ("synthetic",))
+
+    def test_sqlite_connection_closes_and_propagates_other_wal_errors(self):
+        connection = Mock()
+        error = sqlite3.OperationalError("database is locked")
+        connection.execute.side_effect = [Mock(), error]
+        with patch.object(sqlite3, "connect", return_value=connection):
+            with self.assertRaises(sqlite3.OperationalError) as caught:
+                memory.get_db_connection()
+        self.assertIs(caught.exception, error)
+        connection.close.assert_called_once_with()
 
     def test_rotating_file_logger_redacts_messages_and_arguments(self):
         from ada_adapters.file_logging import configure_redacted_file_logger

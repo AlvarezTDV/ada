@@ -152,6 +152,9 @@ class IsolatedPromptFixture(unittest.TestCase):
         (self.workspace / "system_prompt.txt").write_text(
             SYSTEM_PROMPT, encoding="utf-8"
         )
+        prompt_directory_patch = patch.object(ada, "BASE_DIR", self.workspace)
+        prompt_directory_patch.start()
+        self.addCleanup(prompt_directory_patch.stop)
         previous_cwd = Path.cwd()
         os.chdir(self.workspace)
         self.addCleanup(os.chdir, previous_cwd)

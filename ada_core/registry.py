@@ -23,6 +23,7 @@ from typing import Any, Callable
 
 from . import CORE_CONTRACT_VERSION
 from .errors import CapabilityError, CapabilityKind, ErrorCode, redact_secrets
+from .jobs import JobCancelled, _cancel_event
 from .manifest import ExtensionManifest
 
 
@@ -216,6 +217,9 @@ class ExtensionRegistry:
             self._deactivate(entry)
 
     def _invoke(self, entry, operation, deadline, phase):
+        cancel = _cancel_event.get()
+        if cancel is not None and cancel.is_set():
+            raise JobCancelled
         with self._lock:
             self._require_enabled(entry)
             if time.monotonic() >= deadline:
@@ -259,7 +263,25 @@ class ExtensionRegistry:
         completed = None
         try:
             Thread(target=run, daemon=True).start()
-            completed = done.wait(max(0.0, deadline - time.monotonic()))
+            if cancel is None:
+                completed = done.wait(max(0.0, deadline - time.monotonic()))
+            else:
+                while not cancel.is_set():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or done.wait(min(0.05, remaining)):
+                        break
+                if cancel.is_set() or not done.is_set():
+                    # Stop the owned resource and keep the heavy slot until its
+                    # worker leaves the resource context, even on a timeout.
+                    try:
+                        scope.cancel()
+                    finally:
+                        done.wait()
+                    if cancel.is_set():
+                        raise JobCancelled
+                    completed = False
+                else:
+                    completed = True
         except KeyboardInterrupt as interrupt:
             try:
                 scope.cancel()

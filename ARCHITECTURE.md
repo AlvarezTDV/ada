@@ -220,6 +220,25 @@ network or operating-system sandbox; page scripts and subresources remain a
 separate risk. Runtime checks must establish local model/browser compatibility,
 not infer it from package installation or mocked tests.
 
+### HTTP jobs and SSE
+
+The authenticated HTTP chat route validates navigation arguments and the URL
+before returning `202` with `kind: "job"`, `job_id`, and `job_kind: "navigation"`.
+Invalid input stays a synchronous `200` chat error. A process-local `JobManager`
+has one heavy slot; a concurrent submission receives `409` with `detail.job_id`.
+
+- `GET /jobs/{id}` returns the state, result, and redacted error.
+- `GET /jobs/{id}/events` replays up to 500 retained events strictly after
+  `Last-Event-ID`, then tails the job. Frames contain `id`, `event`, and JSON
+  `data`; idle streams send `: ping` every 15 seconds. Streams close after the
+  terminal event. After a replay gap, use the snapshot to recover current state.
+- `POST /jobs/{id}/cancel` is idempotent. `cancel_requested` acknowledges the
+  signal; `cancelled` follows after the runner stops. The registry interrupts
+  owned browser resources and does not start fallback work after cancellation.
+  The slot stays held during cleanup. The bundled server cancels jobs while
+  draining open streams and joins them before closing sessions. Jobs and
+  events are not persisted across restarts.
+
 ## Synthetic provider evaluations
 
 `tests/test_memory_prompt.py` and `tests/test_memory_retrieval.py` stay offline

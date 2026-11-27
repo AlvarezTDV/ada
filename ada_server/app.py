@@ -1,17 +1,21 @@
 """Compose and serve ADA's local HTTP adapter."""
 
+import asyncio
 from contextlib import asynccontextmanager
 from functools import partial
 import os
 
+from anyio import CapacityLimiter
 from anyio.to_thread import run_sync
 from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from ada_core.jobs import JobManager
 from ada_core.session_manager import SessionManager
 from .auth import COOKIE_TTL, TokenAuth
 from .routes_chat import router
+from .routes_jobs import router as jobs_router
 from .schemas import Login
 
 
@@ -47,10 +51,16 @@ def create_app(session_manager=None, status=None, *, token=None,
     async def lifespan(app):
         manager, read_status = await run_sync(_runtime) if session_manager is None else (session_manager, status)
         app.state.manager, app.state.status = manager, read_status
+        app.state.jobs = JobManager()
+        # Idle streams must not exhaust workers serving chat or cancellation.
+        app.state.sse_limiter = CapacityLimiter(16)
         try:
             yield
         finally:
-            await run_sync(manager.shutdown_all)
+            try:
+                await run_sync(app.state.jobs.shutdown)
+            finally:
+                await run_sync(manager.shutdown_all)
 
     app = FastAPI(lifespan=lifespan, openapi_url=None, docs_url=None, redoc_url=None)
     app.state.auth = auth
@@ -95,17 +105,37 @@ def create_app(session_manager=None, status=None, *, token=None,
         return {"authenticated": True}
 
     app.include_router(router)
+    app.include_router(jobs_router)
     return app
 
 
 def main():
-    import uvicorn
+    from uvicorn import Config, Server
+    from uvicorn.main import STARTUP_FAILURE
 
     cert, key = os.getenv("ADA_TLS_CERTFILE"), os.getenv("ADA_TLS_KEYFILE")
     if bool(cert) != bool(key):
         raise ValueError("Set both ADA_TLS_CERTFILE and ADA_TLS_KEYFILE to enable HTTPS")
-    uvicorn.run(create_app(), host="127.0.0.1", port=8000, access_log=False, proxy_headers=False,
-                ssl_certfile=cert, ssl_keyfile=key)
+    app = create_app()
+
+    class JobServer(Server):
+        async def shutdown(self, sockets=None):
+            # Lifespan teardown runs after the HTTP drain. Start cancelling
+            # now so a live SSE response cannot keep its own job running.
+            stop_jobs = asyncio.create_task(asyncio.to_thread(app.state.jobs.shutdown))
+            try:
+                await super().shutdown(sockets=sockets)
+            finally:
+                await stop_jobs
+
+    server = JobServer(Config(app, host="127.0.0.1", port=8000, access_log=False, proxy_headers=False,
+                              ssl_certfile=cert, ssl_keyfile=key))
+    try:
+        server.run()
+    except KeyboardInterrupt:
+        pass
+    if not server.started:
+        raise SystemExit(STARTUP_FAILURE)
 
 
 if __name__ == "__main__":

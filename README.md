@@ -108,9 +108,11 @@ Run `python ada.py --help` for the available startup options. Audio dependencies
 Set `ADA_TOKEN` to a random secret of at least 16 characters (32+ recommended).
 Run `python -B -m ada_server.app`. Uvicorn listens only on `127.0.0.1:8000`.
 `GET /health` is public; it returns `{"status":"ok"}` without diagnostics.
+The installable Android PWA is served at `/` on the same origin. For mobile
+data access, follow the [private Tailscale Serve setup](docs/MOBILE_TAILSCALE_SETUP.md).
 
 - **Native clients:** Send `Authorization: Bearer <ADA_TOKEN>`. Never put the token in a URL.
-- **Browser clients:** Set `ADA_TLS_CERTFILE` and `ADA_TLS_KEYFILE` to enable HTTPS
+- **Direct loopback browser clients:** Set `ADA_TLS_CERTFILE` and `ADA_TLS_KEYFILE` to enable HTTPS
   with a trusted certificate for `127.0.0.1`. From the same origin, send
   `POST /auth/login` with `{"token":"<ADA_TOKEN>"}` to receive a signed
   `HttpOnly`, `Secure`, `SameSite=Strict` cookie. It expires after seven days.

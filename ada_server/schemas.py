@@ -1,5 +1,7 @@
 """Request and response models for the local HTTP API."""
 
+from typing import Literal
+
 from pydantic import BaseModel, SecretStr
 
 from ada_core.domain import SessionMode
@@ -24,3 +26,9 @@ class ChatResult(BaseModel):
     mode: str
     url: str
     notices: tuple[str, ...]
+
+
+class JobAccepted(BaseModel):
+    kind: Literal["job"] = "job"
+    job_id: str
+    job_kind: str

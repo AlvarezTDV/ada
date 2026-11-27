@@ -7,6 +7,7 @@ from .domain import (
     SessionMode, SessionSummary, SpeechOutputReport, TurnMode, WebNavigationRequest, WebNavigationResponse,
 )
 from .errors import CapabilityError, CapabilityKind, ErrorCode, SideEffectProfile, redact_secrets
+from .jobs import JobBusy, JobCancelled, JobEvent, JobFailed, JobManager, JobRecord, JobState
 from .manifest import ExecutionModel, ExtensionManifest, PermissionSet
 from .ports import (
     ConversationStorePort, ExtensionLifecyclePort, InteractiveSpeechInputPort, MemoryCommandPort, MemoryPort,
@@ -22,6 +23,7 @@ __all__ = [
     "MemoryItem", "SpeechOutputReport", "TurnMode", "WebNavigationRequest",
     "WebNavigationResponse", "CapabilityError", "CapabilityKind", "ErrorCode",
     "SideEffectProfile", "redact_secrets", "ExecutionModel", "ExtensionManifest",
+    "JobBusy", "JobCancelled", "JobEvent", "JobFailed", "JobManager", "JobRecord", "JobState",
     "PermissionSet", "ExtensionLifecyclePort", "MemoryCommandPort", "MemoryPort", "ReasoningPort",
     "SpeechInputPort", "InteractiveSpeechInputPort", "SpeechOutputPort", "WebNavigationPort",
     "ExtensionRegistry", "ExtensionState", "HealthReport",

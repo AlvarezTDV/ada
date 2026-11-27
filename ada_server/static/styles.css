@@ -1,0 +1,47 @@
+:root {
+  color-scheme: dark;
+  --brand: linear-gradient(120deg, #fd2636, #ff0080);
+  --base: #0a0a0f;
+  --panel: #13131c;
+  --border: #1f1f2e;
+  --text: #e8e8f0;
+  font: 100%/1.5 system-ui, sans-serif;
+  background: var(--base);
+  color: var(--text);
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0 auto; max-width: 52rem; min-height: 100dvh; }
+header, .sessions, #chat { display: flex; gap: .5rem; align-items: center; }
+header, main { padding: .75rem; }
+header { flex-wrap: wrap; border-bottom: 1px solid var(--border); }
+.brand { font-size: 1.5rem; background: var(--brand); background-clip: text; color: transparent; }
+#connection { margin-inline-end: auto; padding: .2rem .6rem; border-radius: 1rem; background: var(--panel); }
+button, input, select, textarea {
+  min-height: 44px; padding: .45rem .65rem; font: inherit; color: inherit;
+  background: var(--panel); border: 1px solid var(--border); border-radius: .6rem;
+}
+button { cursor: pointer; }
+button:disabled { opacity: .65; cursor: default; }
+.primary, .user { background: var(--brand); color: var(--base); font-weight: 650; }
+:focus-visible { outline: 2px solid #ff0080; outline-offset: 2px; }
+#login { display: grid; gap: .5rem; max-width: 26rem; margin: 2rem auto; }
+#login-error, .error { color: #ffb5c3; }
+#workspace { display: grid; gap: .6rem; }
+.sessions { flex-wrap: wrap; }
+#sessions { flex: 1 1 9rem; min-width: 0; }
+#messages {
+  display: flex; flex-direction: column; align-items: start; gap: .5rem;
+  height: clamp(12rem, 56dvh, 36rem); overflow-y: auto; padding: .6rem;
+  border: 1px solid var(--border); border-radius: .6rem;
+}
+.bubble {
+  flex: none; max-width: 100%; padding: .55rem .75rem; border-radius: .6rem;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.bubble:not(.user) { background: var(--panel); }
+.user { align-self: end; max-width: 90%; }
+a { color: #ffb5d7; }
+a:focus-visible { color: #ffffff; }
+#message { flex: 1; min-width: 0; resize: vertical; }

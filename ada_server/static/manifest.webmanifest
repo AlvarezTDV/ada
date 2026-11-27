@@ -1,0 +1,12 @@
+{
+  "id": "/",
+  "name": "A.D.A",
+  "short_name": "A.D.A",
+  "lang": "es",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "theme_color": "#0a0a0f",
+  "background_color": "#0a0a0f",
+  "icons": [{"src": "/static/icon.svg", "sizes": "192x192 512x512 any", "type": "image/svg+xml", "purpose": "any maskable"}]
+}

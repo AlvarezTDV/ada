@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
+  <meta name="theme-color" content="#0a0a0f">
+  <title>A.D.A</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header>
+    <strong class="brand">A.D.A</strong>
+    <span id="connection" role="status">Conectando…</span>
+    <button id="status" type="button" hidden>/estado</button>
+    <button id="logout" type="button" hidden>Cerrar sesión</button>
+  </header>
+  <main>
+    <form id="login" method="post" autocomplete="off">
+      <label for="token">Token de acceso de ADA</label>
+      <input id="token" type="password" required>
+      <button class="primary">Entrar</button>
+      <p id="login-error" role="alert"></p>
+    </form>
+    <section id="workspace" hidden aria-label="Chat de ADA">
+      <div class="sessions">
+        <select id="sessions" aria-label="Sesión"></select>
+        <button id="ephemeral" type="button">+ Temporal</button>
+        <button id="persistent" type="button">+ Persistente</button>
+      </div>
+      <div id="messages" role="log" aria-label="Mensajes" tabindex="0"></div>
+      <button id="cancel" type="button" hidden>Cancelar</button>
+      <form id="chat" method="post">
+        <textarea id="message" aria-label="Mensaje" placeholder="Escribe un mensaje" rows="2" required></textarea>
+        <button id="send" class="primary">Enviar</button>
+      </form>
+    </section>
+  </main>
+</body>
+</html>

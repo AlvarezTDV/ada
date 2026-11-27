@@ -4,12 +4,14 @@ import asyncio
 from contextlib import asynccontextmanager
 from functools import partial
 import os
+from pathlib import Path
 
 from anyio import CapacityLimiter
 from anyio.to_thread import run_sync
 from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from ada_core.jobs import JobManager
 from ada_core.session_manager import SessionManager
@@ -29,7 +31,11 @@ SECURITY_HEADERS = {
     "Referrer-Policy": "no-referrer",
     "Cache-Control": "no-store",
 }
-PUBLIC_ROUTES = {("GET", "/health"), ("POST", "/auth/login")}
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+PUBLIC_ROUTES = {("GET", "/health"), ("POST", "/auth/login")} | {
+    ("GET", path) for path in ("/", "/manifest.webmanifest", "/sw.js",
+                               "/static/app.js", "/static/styles.css", "/static/icon.svg")
+}
 
 
 def _runtime():
@@ -75,6 +81,8 @@ def create_app(session_manager=None, status=None, *, token=None,
         else:
             response = await call_next(request)
         response.headers.update(SECURITY_HEADERS)
+        if request.scope["path"] == "/sw.js" and 200 <= response.status_code < 300:
+            response.headers["Cache-Control"] = "no-cache"
         return response
 
     @app.exception_handler(RequestValidationError)
@@ -84,6 +92,21 @@ def create_app(session_manager=None, status=None, *, token=None,
     @app.exception_handler(Exception)
     async def internal_error(request, error):
         return JSONResponse({"detail": "Internal server error"}, status_code=500, headers=SECURITY_HEADERS)
+
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+    @app.get("/")
+    async def index():
+        return FileResponse(STATIC_DIR / "index.html", media_type="text/html")
+
+    @app.get("/manifest.webmanifest")
+    async def manifest():
+        return FileResponse(STATIC_DIR / "manifest.webmanifest", media_type="application/manifest+json")
+
+    @app.get("/sw.js")
+    async def worker():
+        return FileResponse(STATIC_DIR / "sw.js", media_type="text/javascript",
+                            headers={"Service-Worker-Allowed": "/"})
 
     @app.get("/health")
     async def health():
